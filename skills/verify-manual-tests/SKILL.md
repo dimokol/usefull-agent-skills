@@ -88,8 +88,13 @@ For each unchecked item, in order:
 
 ## Step 5 — Seed data (when needed)
 
+If a checkbox needs a specific data shape that doesn't exist in the dev environment, **seed it — don't skip the item**. The dev DB is for testing; never leave a checkbox unverified just because the state is missing.
+
 - Prefer creating test data through the UI — it tests the creation path too
-- For complex state: write a one-off `seed-<feature>.mjs` + `cleanup-<feature>.mjs`, run them, delete both after testing. Mark seeded rows `TEST-<FEATURE>-<N>` for easy cleanup
+- For complex state (multi-leg bookings, specific status combos, edge-case enum values): write a one-off `seed-<feature>.mjs` + `cleanup-<feature>.mjs`, run them, delete both files after testing. Mark seeded rows with a `TEST-<FEATURE>-<N>` identifier for safe cleanup
+- Run the cleanup script before reporting back, so the dev DB stays clean
+- After seeding, hard-refresh the page so React Query / SWR caches re-fetch the new data
+- If the UI filters out the seeded state by design (e.g., calendars hide cancelled bookings, lists exclude soft-deleted rows), surface that in the final report and leave the box unchecked with a one-line reason — don't pretend a hidden state was verified
 - Never seed production without explicit user confirmation
 
 ---
