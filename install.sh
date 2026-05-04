@@ -11,6 +11,7 @@ REPO="https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main"
 SKILLS_DIR="$HOME/.claude/skills"
 SKILLS_AVAILABLE=(
   "verify-manual-tests"
+  "babysit-prs"
 )
 
 install_skill() {

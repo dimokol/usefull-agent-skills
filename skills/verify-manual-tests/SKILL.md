@@ -74,28 +74,45 @@ c.connect().then(async () => {
 
 ## Step 4 — Execute checkboxes
 
+**Skip every line that is already `- [x]`.** Re-running the skill must be idempotent — only `- [ ]` items get touched.
+
 For each unchecked item, in order:
 
-1. **Navigate** to the relevant page/feature
-2. **Perform** the described behavior
-3. **Assert** with `browser_snapshot` — check the a11y/text tree for the expected outcome
-4. **Screenshot only on failure** — save to `<project>/.playwright-mcp/pr<N>/fail-<slug>.png`; never on pass (saves tool calls)
-5. Record pass or fail in memory for the body update
+1. **Navigate** to the relevant page/feature.
+2. **Perform** the described behavior.
+3. **Assert — pick the cheapest tool that proves the outcome**:
+   - Checkbox names exact text/state ("toast says X", "button label = Y", "URL contains /foo") → `browser_evaluate` with a one-liner that returns a bool. Way cheaper than a full snapshot.
+   - Checkbox is structural ("the dialog opens with these three sections") → `browser_snapshot` (a11y tree).
+   - Never request a snapshot when an `evaluate` would do.
+4. **On failure**, capture the post-mortem trio in this order — no extra tool calls beyond these three:
+   - `browser_console_messages` (filter to errors + warnings — surfaces the silent JS error a snapshot misses)
+   - `browser_network_requests` (filter to 4xx/5xx and to requests against your own API — catches "the click landed but the mutation 401'd")
+   - `browser_take_screenshot` to `<project>/.playwright-mcp/pr<N>/fail-<slug>.png`
+5. Record pass / fail / blocked in memory for the body update.
 
-**Timeouts**: if `browser_wait_for` hasn't resolved in a reasonable time (use explicit timeout ms), mark the item as failed with "element/condition never appeared" and move on.
+**Default timeout: 5_000 ms** for `browser_wait_for` unless the checkbox itself implies longer (e.g. "after the report generates" — use 30_000ms then). If it doesn't resolve, mark the item failed with "element/condition never appeared in 5s" and move on.
+
+**Browser session reuse**: do NOT close/reopen the browser between checkboxes. Auth, cookies, and selected business persist — exploit them.
+
+**Bug-fix retry bound**: if you fix a bug and push, you may re-run that one checkbox ONCE. If it still fails, leave it `- [ ]` and report the unresolved failure; do not loop.
 
 ---
 
 ## Step 5 — Seed data (when needed)
 
-If a checkbox needs a specific data shape that doesn't exist in the dev environment, **seed it — don't skip the item**. The dev DB is for testing; never leave a checkbox unverified just because the state is missing.
+When a checkbox needs prerequisite data that doesn't exist (e.g. "open a rental reservation" but there are zero reservations), follow this **3-tier fallback with a hard 2-minute effort cap**:
 
-- Prefer creating test data through the UI — it tests the creation path too
-- For complex state (multi-leg bookings, specific status combos, edge-case enum values): write a one-off `seed-<feature>.mjs` + `cleanup-<feature>.mjs`, run them, delete both files after testing. Mark seeded rows with a `TEST-<FEATURE>-<N>` identifier for safe cleanup
-- Run the cleanup script before reporting back, so the dev DB stays clean
-- After seeding, hard-refresh the page so React Query / SWR caches re-fetch the new data
-- If the UI filters out the seeded state by design (e.g., calendars hide cancelled bookings, lists exclude soft-deleted rows), surface that in the final report and leave the box unchecked with a one-line reason — don't pretend a hidden state was verified
-- Never seed production without explicit user confirmation
+**Tier 1 — Reuse existing data.** Search the relevant collection / page for *any* row that satisfies the checkbox's prerequisites (right business, right status, right date window). If you find one, use it.
+
+**Tier 2 — Seed via the admin UI.** This also exercises the creation path, which is a real bonus. Use the same Playwright session — auth and selected business are already there. Mark every UI-seeded entity with a `TEST-` prefix in the title/notes field so it's discoverable.
+
+**Tier 3 — Direct DB seed script.** Only when the UI seed path is itself broken or too long (e.g. needs 8 form steps for one prerequisite). Write a one-off `seed-<feature>.mjs` + `cleanup-<feature>.mjs` in `/tmp/`, run them, delete both immediately after the relevant checkboxes finish. Tag rows with `TEST-<feature>-<timestamp>`.
+
+**The 2-minute rule**: if you've spent two minutes wallclock trying to seed the data and it isn't working, mark the dependent checkbox as **blocked** ("could not seed: <reason>") and move on. Better to leave one box honestly unflipped than to thrash the whole run.
+
+**Cleanup**: at the very end of the run, after Step 6 commits the body, run any cleanup-*.mjs scripts you wrote, then delete them. Do not leave seed scripts on disk.
+
+**Never seed production** without explicit user confirmation. The DEV/TEST DB rule from the project CLAUDE.md applies.
 
 ---
 
@@ -134,9 +151,23 @@ Tell the user:
 |------|--------|
 | No subagents | Run inline always |
 | No parallel PRs | Sequential only |
-| Snapshot for pass | `browser_snapshot` (a11y tree) |
-| Screenshot for fail | `<project>/.playwright-mcp/pr<N>/` only |
+| Skip `[x]` boxes | Idempotent re-runs |
+| Cheapest assertion wins | `browser_evaluate` for known strings; `browser_snapshot` only for structural assertions |
+| Screenshot for fail | `<project>/.playwright-mcp/pr<N>/` only — never on pass |
+| Failure capture trio | `console_messages` + `network_requests` + screenshot |
+| Default `wait_for` timeout | 5_000 ms |
+| Browser session | Reused across checkboxes — never close/reopen |
 | PR body | Checkbox flips only — nothing else |
 | Diff | Skip unless checkboxes are ambiguous |
 | Auth | Check once; skip if already logged in |
 | PR body write | One fetch → batch edits → one write |
+| Seed data | 3-tier fallback (reuse / UI / DB script), 2-min effort cap |
+| Bug-fix retry | Max 1 retry per checkbox after a fix |
+| Cleanup | Delete `/tmp/seed-*.mjs` and `/tmp/cleanup-*.mjs` after the run |
+
+## Token-economy notes
+
+- Full `browser_snapshot` returns can run 5–50 KB of context. Prefer `browser_evaluate('document.body.innerText.includes("Saved")')` style checks when the assertion is a string match.
+- `browser_console_messages` and `browser_network_requests` are huge by default — always filter them (errors only / 4xx-5xx only) before logging.
+- The fail-trio is FIXED to 3 tool calls. Don't add more "for context" — the screenshot already captures visible state.
+- Resist the urge to re-snapshot after every tiny interaction. Snapshot at the assertion point only.
