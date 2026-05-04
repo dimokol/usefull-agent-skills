@@ -1,155 +1,189 @@
 ---
 name: babysit-prs
-description: End-to-end PR finalization for one or more open PRs. Spawns a single background orchestrator that handles Copilot review (parallel across PRs, auto-implements valid suggestions, replies + resolves every thread per the repo's CLAUDE.md), then runs verify-manual-tests sequentially (Playwright is single-instance), and finishes only when every listed PR is merge-ready. Returns control immediately so the user can keep working. Use when the user lists 2+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
+description: End-to-end PR finalization for one or more open GitHub PRs. Spawns one background subagent per PR; each subagent independently handles Copilot review (parallel across PRs), then runs verify-manual-tests serialized by a filesystem lock (Playwright is single-instance), and reports a compact JSON status. Returns control to the calling session immediately so the user can keep working. Use when the user lists 1+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
 ---
 
 # babysit-prs
 
-Take a list of open PRs to merge-ready autonomously. Main session stays cheap — one background orchestrator does everything else.
+Take a list of open PRs to merge-ready autonomously. The calling session stays usable — N short-running background subagents do the actual work.
 
 ## Invocation
 
-`/babysit-prs <repo>:<pr> [<repo>:<pr> ...]`
+`/babysit-prs <pr-spec> [<pr-spec> ...]`
 
-Example: `/babysit-prs be:188 fe:256 client:166`
-
-If the user passes bare numbers, ask which repo each belongs to before proceeding. If still ambiguous, stop.
+Each `<pr-spec>` is either:
+- `<repo-key>:<pr-number>` — e.g. `be:188`
+- A full GitHub PR URL — e.g. `https://github.com/Knorcedger/ridebly-be/pull/188`
+- A bare PR number — only allowed when ALL specs in the list are bare and the user follows up to clarify which repo (or you can infer it from `gh pr view <n> --repo <each>` probing)
 
 ## Repo map
 
-| Key | Path | GitHub repo |
-|-----|------|-------------|
-| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` |
-| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` |
-| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` |
+Treat this as the source of truth. To adapt the skill to a different project, just edit this table.
 
-Resolve once in main session, pass into the orchestrator prompt — never read repo files in the main session beyond this lookup.
+| Key | Path | GitHub repo | Quality gate command |
+|-----|------|-------------|----------------------|
+| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` | `npm run lint && npm run typecheck && PORT=4001 npm test` |
+| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` | `npm run lint && npm run build` |
+| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` | `npm run lint && npm run build` |
 
-## Procedure (main session)
+## Procedure (calling session)
 
-1. **Validate** each PR with `gh pr view <pr> --repo <gh-repo> --json state,headRefName -q '{state,head:.headRefName}'`. Skip closed/merged PRs and tell the user.
-2. **Skip already-finalized PRs**: if `/tmp/babysit-<pr>-tested` exists, exclude it (resume support). Mention which were skipped.
-3. **Dispatch ONE background `general-purpose` Agent** with `run_in_background: true`. Its prompt is the entire `## Orchestrator plan` block below, with PR placeholders substituted.
-4. **Hand control back to the user** with the orchestrator's task ID and a one-line "running in background — you'll be notified per PR completion and at the end" message. Do not do anything else.
+1. **Parse + normalize** the PR list. For each entry, resolve to `{key, ghRepo, path, gateCmd, pr}`. URL: extract `owner/repo` from path, match into the repo map. `repo:pr`: direct lookup. Bare numbers: ask the user.
 
-Do NOT dispatch per-PR agents from the main session — every direct dispatch leaks its summary into your context. Delegate the fan-out to the orchestrator.
+2. **Validate + filter:**
+   ```bash
+   gh pr view <pr> --repo <ghRepo> --json state,headRefName -q '{state,head:.headRefName}'
+   ```
+   Skip PRs that are not `OPEN`. Tell the user which were skipped. Also skip any PR for which `/tmp/babysit-<pr>-done` exists (resume support — re-runs do nothing for already-completed PRs).
 
----
+3. **Clean stale Playwright lock** (defensive — don't inherit a leftover from a crashed previous run):
+   ```bash
+   if [ -d /tmp/babysit-playwright.lock ] && [ ! -s /tmp/babysit-playwright.lock/owner-pid ]; then rmdir /tmp/babysit-playwright.lock 2>/dev/null; fi
+   ```
 
-## Orchestrator plan (passed verbatim to the background agent)
+4. **Dispatch one background `general-purpose` Agent per remaining PR.** Each gets the entire `## Per-PR subagent task` block below as its prompt, with placeholders substituted. Use `run_in_background: true`. Dispatch all of them in a single message (parallel).
 
-> Substitute `<PRS>` with a JSON list `[{repo, ghRepo, path, pr, branch}, …]` from main-session resolution.
+5. **Hand control back to the user.** One sentence: "Dispatched N agents. They'll write per-PR status to /tmp/babysit-<pr>-status.json and return a JSON line. Continue with other work — I won't poll." That's it. Do not start polling.
 
-You are the PR babysitter. Take this PR list to merge-ready, then exit:
-
-**PRs:** `<PRS>`
-
-### Phase A — Copilot review handling (PARALLEL across PRs)
-
-For each PR, spawn ONE `run_in_background: true` `general-purpose` subagent with this self-contained task prompt:
-
-```
-PR: {pr} on {ghRepo} (branch {branch}). Repo path: {path}.
-
-1. WAIT for Copilot's review:
-   Loop until `gh api repos/{ghRepo}/pulls/{pr}/reviews | jq '[.[]|select(.user.login=="copilot-pull-request-reviewer[bot]")]|length>0'` returns true. Between polls, use ScheduleWakeup with delaySeconds=270 (cache window). Cap total wait at 30 minutes.
-
-2. cd into {path}. The harness will load the repo's CLAUDE.md — read its "PR Workflow" section to know the project's conventions for replying/resolving threads.
-
-3. List Copilot comments:
-   gh api repos/{ghRepo}/pulls/{pr}/comments \
-     | jq '[.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | {id, node_id, path, line, body}]'
-
-4. For each comment, decide validity per repo CLAUDE.md (use judgment — Copilot can be wrong about niche/wrong-context items):
-   a) VALID → implement the fix. Run repo quality gates (be: lint+typecheck+jest; fe/client: lint+build). Commit (no --no-verify, no --amend). Push.
-   b) NOT VALID → no code change.
-   c) Reply via `gh api repos/{ghRepo}/pulls/{pr}/comments/{id}/replies -f body='…'` with either commit hash + 1-line rationale OR a clear non-applying reason.
-   d) Resolve the thread: `gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"{node_id}"}){thread{id}}}'`.
-
-5. Touch /tmp/babysit-{pr}-review-done.
-
-6. Return ONE compact JSON line, nothing else:
-   {"pr":{pr},"applied":[<commit hashes>],"declined":N,"blockers":[<short strings>]}
-```
-
-**Token rules for Phase A:**
-- Use `run_in_background: true` always — react to completion notifications, do not poll.
-- Don't ask the children for narration; they return one JSON line.
-- Don't aggregate intermediate state — trust the markers + returns.
-
-### Phase B — Manual testing (SEQUENTIAL across PRs)
-
-After ALL Phase-A markers exist (`/tmp/babysit-<pr>-review-done` for each PR), iterate the original PR order. For each PR, INLINE (do NOT spawn a subagent — `verify-manual-tests` is already inline-optimised):
-
-1. Invoke the `verify-manual-tests` skill with the PR's repo and number.
-2. Wait for it to complete (synchronous when run inline).
-3. Touch `/tmp/babysit-<pr>-tested`.
-
-Only ONE `verify-manual-tests` runs at a time across the whole babysit run — Playwright is a singleton.
-
-### Done criteria — a PR is merge-ready when ALL of:
-
-1. Every Copilot review thread has a reply AND is resolved.
-2. Repo quality gates green (be: lint+typecheck+test; fe/client: lint+build).
-3. Every `- [ ]` in the PR body's `## Manual Testing` section is `- [x]`.
-4. No unresolved blockers from Phase A or Phase B.
-
-### Stop conditions — pause + notify IMMEDIATELY when
-
-- **5-hour rolling token usage ≥ 90%.** Detect by:
-  a) Catching any 429 / "rate limit" / "usage limit" error from any tool call. On first such error, stop spawning new work, finish current sub-tasks if cheap, then exit cleanly.
-  b) Best-effort soft check at the start of each Phase: `claude /usage 2>&1 | head -20` (if the CLI exposes it). If parseable and ≥90%, exit cleanly.
-  c) Conservative heuristic: never spawn Phase B if Phase A took >2.5 hours of wall clock — assume budget pressure.
-- A subagent fails the same task 3× in a row.
-- 4 hours wall-clock with no forward progress (no marker created in 4h).
-- A blocker requires a product decision (e.g., Copilot suggests a UX change you can't decide alone).
-- CI/quality gates keep failing for a non-obvious reason after 1 push attempt.
-
-When pausing: write `/tmp/babysit-status.md` with current state per PR, then PushNotification the user with a 1-line summary + path to the status file. Do NOT delete markers — a re-invocation can resume.
-
-### Per-PR completion notifications
-
-After EACH PR finishes Phase B (whether READY or BLOCKED), send a PushNotification:
-
-> `babysit-prs: <repo>:<pr> READY ✅` or
-> `babysit-prs: <repo>:<pr> BLOCKED ⚠ — <one-line reason>`
-
-### Final report (the orchestrator's single return value)
-
-≤30 lines total, one section per PR. Format:
-
-```
-## babysit-prs report
-
-### {repo}:{pr} — READY ✅ | BLOCKED ⚠
-- Copilot: {applied} valid → applied & pushed ({hashes}); {declined} declined ({short reasons or empty})
-- Manual tests: {pass}/{total} passed ({fail-slugs if any})
-- Quality gates: green | failing ({which})
-- Blockers: {bullets or "none"}
-
-…
-
-Status file: /tmp/babysit-status.md
-```
-
-### Token-budget rules (orchestrator's own context)
-
-- **Never** read repo files in YOUR (orchestrator) context — push everything into Phase-A subagents (they `cd` into the repo and see the right CLAUDE.md).
-- Phase-A subagent return values are ≤300 chars (one JSON line each). Don't aggregate them into prose during the run; only the final report parses them.
-- Use `Monitor` (not Bash sleep loops) ONLY if you need to react to a continuous log stream. For one-shot waits, use `Bash run_in_background` with an `until` condition.
-- Use `ScheduleWakeup 270s` for any "wait then check again" beat. Never sleep > 300s in any single hop (cache TTL).
-- Don't snapshot or screenshot from this orchestrator — verify-manual-tests handles all browser interaction.
-
-### Resume support
-
-If `/tmp/babysit-<pr>-review-done` exists for a PR, skip Phase A for it. If `/tmp/babysit-<pr>-tested` exists, skip Phase B too.
-
-To force a clean run, the user can `rm /tmp/babysit-*` before re-invoking.
+   When each background Agent completes, the runtime will surface its return value — include any blocker info in your response and ask what the user wants to do.
 
 ---
 
-## Stop & cleanup (main session, after orchestrator returns)
+## Per-PR subagent task (passed verbatim with placeholders substituted)
 
-1. Surface the orchestrator's final report to the user (verbatim).
-2. Tell them which PRs are merge-ready and which need their attention.
-3. Do NOT auto-merge. Merging is always the user's call.
+> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{gateCmd}`, `{branch}`.
+
+You are a PR babysitter for ONE pull request. Your job is to take it from "open with potentially-pending Copilot review" to "merge-ready", then exit with a single-line JSON status.
+
+**PR:** {pr} on {ghRepo}, branch `{branch}`, working tree at `{path}`.
+**Quality gate command (run from {path}):** `{gateCmd}`
+
+## NON-NEGOTIABLE RULES — read first
+
+1. **Execute. Do not narrate. Do not plan out loud.** Every sentence in your response that isn't a tool call wastes tokens.
+2. **Do not bail because a tool seems unavailable.** If `TaskCreate` / `PushNotification` / etc. aren't ready, run `ToolSearch` with `select:<tool-name>` first, OR fall back to `Bash`. The bare minimum required tools are `Bash`, `Read`, `Edit`, `Write`, `Skill` — these are always present. Polling = `Bash run_in_background` + `until` loop. Status updates = write to a file. Done.
+3. **Never invoke another subagent.** You are the leaf — do everything inline.
+4. **Failure to make forward progress is not a valid outcome.** If something looks blocked, write a precise blocker to `/tmp/babysit-{pr}-status.json` and exit cleanly — do not produce vague speculation.
+5. **Status file is your truth source.** Write `/tmp/babysit-{pr}-status.json` after every meaningful checkpoint so a re-run can resume.
+
+## Step 0 — initialize
+
+```bash
+cd {path}
+echo '{"pr":{pr},"phase":"start"}' > /tmp/babysit-{pr}-status.json
+```
+
+If `/tmp/babysit-{pr}-review-done` already exists, jump to Step 4. If `/tmp/babysit-{pr}-done` exists, exit immediately with `{"pr":{pr},"status":"already-done"}`.
+
+## Step 1 — wait for Copilot's review (cap 30 min)
+
+Use `Bash run_in_background` with this exact pattern:
+
+```bash
+START=$(date +%s)
+until [ "$(gh api repos/{ghRepo}/pulls/{pr}/reviews 2>/dev/null | jq '[.[]|select(.user.login=="copilot-pull-request-reviewer[bot]")]|length' 2>/dev/null)" -gt 0 ]; do
+  if [ $(( $(date +%s) - START )) -gt 1800 ]; then echo "TIMEOUT"; exit 1; fi
+  sleep 60
+done
+echo "REVIEW_FOUND"
+```
+
+Use `BashOutput` to check for `REVIEW_FOUND` or `TIMEOUT`. If TIMEOUT, write `{"pr":{pr},"phase":"review-wait","blocker":"copilot review never arrived in 30 min"}` to status, skip to Step 4 (manual tests can still run).
+
+## Step 2 — fetch + handle Copilot comments
+
+```bash
+gh api repos/{ghRepo}/pulls/{pr}/comments \
+  | jq '[.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | {id, node_id, path, line, body, in_reply_to_id}]' \
+  > /tmp/babysit-{pr}-comments.json
+```
+
+For each top-level comment (skip ones with non-null `in_reply_to_id`):
+
+a) `Read` the file at the line referenced.
+
+b) Decide validity per the repo's CLAUDE.md PR-Workflow conventions (you're in `{path}` so the harness already loaded it). Use judgment — Copilot is often wrong about niche or context-dependent items.
+
+c) **If valid**: implement the fix. After all valid fixes for THIS PR, run `{gateCmd}` from `{path}`. If gates pass, commit (no `--no-verify`, no `--amend`) and push:
+   ```bash
+   git add -A && git commit -m "fix: address Copilot review on PR #{pr}" && git push
+   ```
+   Capture the commit hash for the reply.
+
+d) **Reply** to the thread:
+   ```bash
+   gh api -X POST repos/{ghRepo}/pulls/{pr}/comments/<comment-id>/replies \
+     -f body='<commit hash + 1-line rationale OR clear non-applying reason>'
+   ```
+
+e) **Resolve** the thread:
+   ```bash
+   gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<node_id>"}){thread{id}}}'
+   ```
+
+After every comment is replied to + resolved:
+- Touch `/tmp/babysit-{pr}-review-done`
+- Write status: `{"pr":{pr},"phase":"review-done","applied":["<sha>",...],"declined":N,"blockers":[...]}`
+
+## Step 3 — verify quality gates (no Copilot fix path)
+
+If you didn't push any fix in Step 2 (zero valid Copilot comments), still run `{gateCmd}` once to confirm dev/main hasn't broken the branch since opening. If it fails, write a blocker and skip Step 4 — manual tests on broken code are noise.
+
+## Step 4 — verify-manual-tests (Playwright lock)
+
+Acquire the lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
+
+```bash
+START=$(date +%s)
+until mkdir /tmp/babysit-playwright.lock 2>/dev/null; do
+  if [ $(( $(date +%s) - START )) -gt 14400 ]; then echo "LOCK_TIMEOUT"; exit 1; fi
+  sleep 30
+done
+echo "$$" > /tmp/babysit-playwright.lock/owner-pid
+trap 'rm -rf /tmp/babysit-playwright.lock' EXIT
+```
+
+(LOCK_TIMEOUT after 4h means another PR's tests have been hung; give up gracefully.)
+
+With the lock held, invoke the `verify-manual-tests` skill via the `Skill` tool. Pass the PR number ({pr}) and repo ({ghRepo}). It runs inline, drives Playwright through the PR's `## Manual Testing` section, flips checkboxes, returns when done.
+
+After it returns:
+```bash
+rm -rf /tmp/babysit-playwright.lock
+touch /tmp/babysit-{pr}-tested
+touch /tmp/babysit-{pr}-done
+```
+
+## Step 5 — final return
+
+Return EXACTLY ONE JSON line, nothing else, no narration before or after:
+
+```json
+{"pr": {pr}, "status": "READY|BLOCKED", "applied": ["sha", ...], "declined": N, "tests": "X/Y", "blockers": ["short reasons", ...]}
+```
+
+`status` is `READY` only when (1) all Copilot threads replied + resolved, (2) gates green, (3) every `- [ ]` in the PR's `## Manual Testing` is `- [x]`. Otherwise `BLOCKED`.
+
+---
+
+## Stop conditions (each per-PR subagent)
+
+- **5-hour rate-limit guard.** If any tool call returns a 429 / "rate limit" / "usage limit" error, write a blocker `{"phase": "<current>", "blocker": "rate limit hit"}` to status and exit cleanly — do not retry.
+- 4 hours wall-clock with no marker advancing → write blocker, exit.
+- Same individual operation fails 3× in a row → write blocker for that operation only, continue to the next.
+- A Copilot comment requires a product decision you can't make alone → reply to the thread saying so + leave it unresolved + add to blockers list. Do NOT resolve threads you skipped.
+
+---
+
+## Token-economy notes (calling session perspective)
+
+- Calling session does N background `Agent` dispatches in one message. Each dispatch is ~2KB of prompt; total dispatch cost is bounded.
+- Each subagent returns ONE JSON line (~250 chars). Total return cost: N × 250 chars.
+- All gh / git / file work happens inside subagent contexts — your session never reads the repo files.
+- `verify-manual-tests` runs INSIDE each subagent (not as a sub-subagent), inheriting that skill's own efficient tool-use rules.
+- Marker files in `/tmp/` provide resume support. To wipe and re-run cleanly: `rm /tmp/babysit-*`.
+
+## When to use vs not
+
+**Use when:** 1+ open PRs need both Copilot-review handling and manual testing taken to merge-ready.
+**Don't use when:** PR has no Copilot review enabled AND no `## Manual Testing` section — there's nothing to babysit. Run `verify-manual-tests` directly for a single test pass.
