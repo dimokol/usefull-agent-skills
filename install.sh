@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# install.sh — install skills from dimokol/usefull-agent-skills into ~/.claude/skills/
+# install.sh — install skills from dimokol/usefull-agent-skills into an agent skills dir.
 #
 # Usage:
 #   Install a specific skill:   bash install.sh verify-manual-tests
 #   Install all skills:         bash install.sh
+#   Install for Codex:          SKILLS_DIR="$HOME/.codex/skills" bash install.sh
 
 set -euo pipefail
 
 REPO="https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main"
-SKILLS_DIR="$HOME/.claude/skills"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
 SKILLS_AVAILABLE=(
   "verify-manual-tests"
   "babysit-prs"
@@ -33,4 +34,4 @@ else
 fi
 
 echo ""
-echo "Done. Restart Claude Code (or open a new session) to pick up new skills."
+echo "Done. Restart your agent (or open a new session) to pick up new skills."

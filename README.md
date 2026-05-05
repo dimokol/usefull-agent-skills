@@ -1,6 +1,11 @@
 # useful-agent-skills
 
-A collection of Claude Code skills for AI-assisted development workflows. Each skill is a single self-contained markdown file you drop into `~/.claude/skills/`.
+A collection of agent skills for AI-assisted development workflows. The skills are authored in Claude/Codex-style `SKILL.md` format and are oriented around specific PR-management workflows, but the workflows are reusable by any agent or harness that can load markdown skill instructions.
+
+Each skill is a single self-contained markdown file. Install it into the skill directory used by your agent:
+
+- Claude Code: `~/.claude/skills/`
+- Codex: `~/.codex/skills/`
 
 > **Companion extension worth installing first if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts. See the `babysit-prs` section below for details.
 
@@ -8,7 +13,7 @@ A collection of Claude Code skills for AI-assisted development workflows. Each s
 
 ## Install
 
-### One-liner (recommended)
+### Claude Code one-liner
 
 Install a specific skill:
 
@@ -24,14 +29,33 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/i
 
 Then **restart Claude Code** (or open a new session) — skills are picked up on session start.
 
-### Manual install
+### Codex install
 
-Skills are plain markdown files. Copy any skill directory to `~/.claude/skills/`:
+Install all skills into Codex's skill directory:
 
 ```bash
-mkdir -p ~/.claude/skills/<skill-name>
+SKILLS_DIR="$HOME/.codex/skills" \
+  bash <(curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh)
+```
+
+Install a specific skill:
+
+```bash
+SKILLS_DIR="$HOME/.codex/skills" \
+  bash <(curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh) verify-manual-tests
+```
+
+Then **restart Codex** (or open a new session) — skills are picked up on session start.
+
+### Manual install
+
+Skills are plain markdown files. Copy any skill directory to your agent's skills directory:
+
+```bash
+AGENT_SKILLS_DIR="$HOME/.claude/skills" # or "$HOME/.codex/skills"
+mkdir -p "$AGENT_SKILLS_DIR/<skill-name>"
 curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/skills/<skill-name>/SKILL.md \
-  -o ~/.claude/skills/<skill-name>/SKILL.md
+  -o "$AGENT_SKILLS_DIR/<skill-name>/SKILL.md"
 ```
 
 ---
@@ -127,11 +151,11 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/i
 
 ---
 
-## How skills work in Claude Code
+## How skills work
 
-Skills are markdown files that Claude Code loads (lazily) on demand. When the user asks Claude to do something matching a skill's `description`, or invokes it by name via the `Skill` tool, Claude reads the file and follows its instructions exactly.
+Skills are markdown files that compatible agents load on demand. When the user asks for something matching a skill's `description`, or invokes it by name, the agent reads the file and follows its instructions.
 
-Skills live in `~/.claude/skills/<skill-name>/SKILL.md`. Adding a new file there and restarting the session is all that's needed — no plugin registration, no settings editing.
+Skills live at `<agent-skills-dir>/<skill-name>/SKILL.md`, for example `~/.claude/skills/<skill-name>/SKILL.md` or `~/.codex/skills/<skill-name>/SKILL.md`. Adding a new file there and restarting the session is all that's needed — no plugin registration or settings editing.
 
 **Skill metadata** (the YAML `name` + `description`) is loaded into every session's context (cheap — one line per skill). Skill **bodies** are only loaded when invoked, so you can have many skills installed without bloating context.
 
