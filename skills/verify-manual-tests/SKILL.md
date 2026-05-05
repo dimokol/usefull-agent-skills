@@ -94,7 +94,33 @@ For each unchecked item, in order:
 
 **Browser session reuse**: do NOT close/reopen the browser between checkboxes. Auth, cookies, and selected business persist — exploit them.
 
-**Bug-fix retry bound**: if you fix a bug and push, you may re-run that one checkbox ONCE. If it still fails, leave it `- [ ]` and report the unresolved failure; do not loop.
+### Bug-fix loop — when to fix vs report
+
+The job isn't to *catalogue* failures — it's to take this PR to merge-ready. If a checkbox fails because of a real bug, **fix it** (within scope) and re-run. If a checkbox fails because of state the user owns (build cache, dev server they started, etc.), **report a precise one-line recovery command** and move on.
+
+**AUTO-FIX, then re-run the failing checkbox** (max 3 attempts per checkbox, escalating):
+
+| Failure | Fix |
+|---|---|
+| Real bug in PR-touched code (e.g. dialog doesn't load saved state, raw enum shown instead of formatted label) | Read the relevant file, implement the obvious fix, run repo's quality gates, commit (`fix: <one-line> — found via PR #N manual test`), push, re-run the checkbox |
+| Lint / typecheck error from your fix | Read the error, fix it, re-run gates |
+| Missing test data | Use the Step-5 3-tier seed protocol |
+| Empty selector / element not yet rendered | Increase the `wait_for` timeout for that one assertion (cap 30_000ms), retry once |
+
+**Scope guard**: only modify files that are part of the PR's diff OR are obviously the source of the bug (a 1-file fix is always in scope; a refactor across 5 files is not). If the fix would require touching code outside the PR's surface, leave the checkbox unflipped and report.
+
+**ESCALATE — report blocker, do not fix** (leave checkbox `- [ ]`, include in final report):
+
+| Failure | Blocker line |
+|---|---|
+| `Cannot find module './vendor-chunks/*.js'` (Next.js stale cache) | "Stale `.next` for `<repo>` — run `rm -rf <repo>/.next` and restart the dev server, then re-invoke" |
+| Dev server returns HTML 502 / connection refused | "Dev server for `<repo>` (port `<n>`) is down — please start `npm run dev`" |
+| GraphQL query / mutation error referencing fields not in current schema | "Backend types stale — run `npm run types:update` in `<repo>`" |
+| Bug requires a design / product decision (e.g. "should X cascade-delete Y?") | "Needs your call: <what + why>" |
+| Fix would expand scope beyond this PR (cross-cutting refactor, dependency upgrade, schema migration) | "Out of scope for this PR: <what>; suggest follow-up PR" |
+| Same operation has failed 3× with 3 different fix attempts | "Persistent: <symptom>, tried <attempts>" |
+
+**Hard cap**: 3 fix attempts per checkbox. The 3rd attempt MUST be different from the first two (don't re-try the same fix). If the 3rd fails, escalate.
 
 ---
 

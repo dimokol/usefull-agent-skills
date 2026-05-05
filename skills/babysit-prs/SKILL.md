@@ -20,11 +20,13 @@ Each `<pr-spec>` is either:
 
 Treat this as the source of truth. To adapt the skill to a different project, just edit this table.
 
-| Key | Path | GitHub repo | Quality gate command |
-|-----|------|-------------|----------------------|
-| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` | `npm run lint && npm run typecheck && PORT=4001 npm test` |
-| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` | `npm run lint && npm run build` |
-| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` | `npm run lint && npm run build` |
+| Key | Path | GitHub repo | Quality gate command | Shared resources held by gate |
+|-----|------|-------------|----------------------|-------------------------------|
+| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` | `npm run lint && npm run typecheck && PORT=4001 npm test` | `be-test-db` (TEST MongoDB is wiped on each suite boot — concurrent BE tests collide) |
+| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` | `npm run lint && npm run build` | none |
+| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` | `npm run lint && npm run build` | none |
+
+The `playwright` resource is held during `verify-manual-tests` for any PR with a `## Manual Testing` section, regardless of repo.
 
 ## Procedure (calling session)
 
@@ -135,11 +137,42 @@ After every comment is replied to + resolved:
 
 ## Step 3 — verify quality gates (no Copilot fix path)
 
-If you didn't push any fix in Step 2 (zero valid Copilot comments), still run `{gateCmd}` once to confirm dev/main hasn't broken the branch since opening. If it fails, write a blocker and skip Step 4 — manual tests on broken code are noise.
+If your repo holds a shared-resource gate (see the "Shared resources held by gate" column in the repo map), acquire that lock before running `{gateCmd}`:
+
+```bash
+# Only if the repo map says this repo's gate touches a shared resource (e.g. `be-test-db`)
+START=$(date +%s)
+until mkdir /tmp/babysit-tests-{resource-name}.lock 2>/dev/null; do
+  if [ $(( $(date +%s) - START )) -gt 3600 ]; then echo "GATE_LOCK_TIMEOUT"; exit 1; fi
+  sleep 30
+done
+echo "$$" > /tmp/babysit-tests-{resource-name}.lock/owner-pid
+trap 'rm -rf /tmp/babysit-tests-{resource-name}.lock' EXIT
+```
+
+For Ridebly's `be` repo this means `mkdir /tmp/babysit-tests-be-test-db.lock`. Other repos: skip the lock entirely.
+
+Then run `{gateCmd}`. If it fails, classify the failure before bailing:
+
+- **Looks like resource collision** (e.g. test output shows MongoDB connection wiped, fixtures reset mid-run, "tests clear all collections on startup"): you didn't have the lock or the lock dance failed. Wait 30s, re-acquire, re-run ONCE.
+- **Fail from your own change in Step 2**: read the error, fix it in code, commit + push as an extra commit, re-run gates.
+- **Fail from pre-existing brokenness on the branch**: write a blocker `{"blocker":"gate failing pre-existing on <branch>: <one-line summary>"}` and skip Step 4.
+
+Whether or not you ran a fix in Step 2, you ALWAYS run gates at least once to confirm green-on-merge.
+
+After gates green, release the lock immediately (`rm -rf /tmp/babysit-tests-{resource-name}.lock`) so other PRs can proceed — don't hold it through Step 4.
 
 ## Step 4 — verify-manual-tests (Playwright lock)
 
-Acquire the lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
+First, check whether this PR has a `## Manual Testing` section at all:
+
+```bash
+gh pr view {pr} --repo {ghRepo} --json body -q '.body' | grep -q '## Manual Testing' && echo "HAS_MT" || echo "SKIP_MT"
+```
+
+If `SKIP_MT`, jump to Step 5 — there's nothing to drive Playwright through.
+
+Otherwise acquire the Playwright lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
 
 ```bash
 START=$(date +%s)
@@ -202,8 +235,39 @@ Return EXACTLY ONE JSON line, nothing else, no narration before or after:
 
 - **5-hour rate-limit guard.** If any tool call returns a 429 / "rate limit" / "usage limit" error, write a blocker `{"phase": "<current>", "blocker": "rate limit hit"}` to status and exit cleanly — do not retry.
 - 4 hours wall-clock with no marker advancing → write blocker, exit.
-- Same individual operation fails 3× in a row → write blocker for that operation only, continue to the next.
+- Same individual operation fails 3× in a row WITH 3 DIFFERENT recovery strategies → write blocker for that operation only, continue to the next.
 - A Copilot comment requires a product decision you can't make alone → reply to the thread saying so + leave it unresolved + add to blockers list. Do NOT resolve threads you skipped.
+
+## Failure classification — when to fix vs report
+
+The defining principle: **never bail without trying**. Either fix it (in-scope, local) or report a precise one-line recovery command (the action belongs to the user's domain). Don't just say "tests failed" and exit — that wastes the run.
+
+### AUTO-FIX — implement, push, retry (don't ask)
+
+| Symptom | Action |
+|---|---|
+| Test failures with N collisions, fixtures wiped mid-run, "duplicate key on startup" | Resource-collision pattern. Acquire the relevant lock from Step 3, re-run gates serially. |
+| Lint / typecheck / build error introduced by your own commit in Step 2 | Read the error, fix it, commit as an extra patch, re-run. |
+| `verify-manual-tests` finds a real bug in PR-touched code (e.g. dialog state not reloading after save, raw enum shown instead of formatted label) | Read the relevant file, implement the obvious fix, commit `fix: <one-line> — found via PR #{pr} manual test`, push, re-run that checkbox. Hard cap: 3 attempts per checkbox, the 3rd must be a *different* fix. |
+| Missing test data (no reservations exist for "open a reservation" checkbox) | Use the verify-manual-tests Step 5 3-tier seed protocol. |
+| Transient gh / git network blip | Wait 10s, retry once. |
+
+### REPORT BLOCKER — do NOT touch (the user owns this)
+
+| Symptom | Blocker line in your status |
+|---|---|
+| `Cannot find module './vendor-chunks/*.js'` (stale Next.js cache) | `"stale .next in <repo> — run 'rm -rf <repo>/.next' and restart your 'npm run dev', then re-invoke /babysit-prs"` |
+| Dev server returns 502 / connection refused | `"<repo> dev server (port <n>) is down — please 'npm run dev', then re-invoke"` |
+| Database schema out of sync with code (e.g. unknown collection / missing field) | `"DB schema mismatch in <repo> — needs migration, manual review required"` |
+| Copilot comment requires design / product decision | `"PR #{pr} thread <url>: needs your call — <one-line summary>"` |
+| Fix would expand scope (cross-cutting refactor, dep upgrade, schema migration, > ~5 files) | `"out of scope for this PR — suggest follow-up PR for <what>"` |
+
+### KEY DISTINCTION
+
+You own: code under `{path}` (the PR's working tree), gh API, git, your own background processes.
+User owns: dev servers running on the host, build caches (`.next`, `dist`, `node_modules` reinstall), DB schemas, anything they explicitly asked you not to touch.
+
+If a fix would require touching anything in the user-owned column, write the blocker with the exact recovery command and move to the next thing. Don't pause the whole subagent waiting — just blocker that one item and continue.
 
 ---
 
