@@ -38,16 +38,32 @@ The `playwright` resource is held during `verify-manual-tests` for any PR with a
    ```
    Skip PRs that are not `OPEN`. Tell the user which were skipped. Also skip any PR for which `/tmp/babysit-<pr>-done` exists (resume support — re-runs do nothing for already-completed PRs).
 
-3. **Clean stale Playwright lock** (defensive — don't inherit a leftover from a crashed previous run):
+3. **Precondition: main checkouts must be clean.** Phase B serializes on each repo's *main* working tree (Playwright runs against the user's existing dev servers, which point at the main checkout). For each repo touched by the PR list:
    ```bash
-   if [ -d /tmp/babysit-playwright.lock ] && [ ! -s /tmp/babysit-playwright.lock/owner-pid ]; then rmdir /tmp/babysit-playwright.lock 2>/dev/null; fi
+   git -C <path> status --porcelain
+   ```
+   If non-empty, REFUSE to dispatch. Tell the user precisely what's dirty (path + filename) and ask them to commit, stash, or restore before re-invoking. Do NOT auto-stash — those changes are theirs.
+
+   Save each repo's current branch (for restore at end of run): `git -C <path> rev-parse --abbrev-ref HEAD > /tmp/babysit-<repo>-original-branch`.
+
+4. **Clean stale locks** (defensive — don't inherit leftovers from a crashed previous run):
+   ```bash
+   for lock in /tmp/babysit-playwright.lock /tmp/babysit-tests-*.lock /tmp/babysit-main-*.lock; do
+     [ -d "$lock" ] && rmdir "$lock" 2>/dev/null
+   done
    ```
 
-4. **Dispatch one background `general-purpose` Agent per remaining PR.** Each gets the entire `## Per-PR subagent task` block below as its prompt, with placeholders substituted. Use `run_in_background: true`. Dispatch all of them in a single message (parallel).
+5. **Dispatch one background `general-purpose` Agent per remaining PR.** Each gets the entire `## Per-PR subagent task` block below as its prompt, with placeholders substituted. Use `run_in_background: true`. Dispatch all of them in a single message (parallel).
 
-5. **Hand control back to the user.** One sentence: "Dispatched N agents. They'll write per-PR status to /tmp/babysit-<pr>-status.json and return a JSON line. Continue with other work — I won't poll." That's it. Do not start polling.
+6. **Hand control back to the user.** One sentence: "Dispatched N agents. Each works in its own git worktree at `<path>--babysit-pr-<pr>`. They'll write status to /tmp/babysit-<pr>-status.json and return a JSON line. Continue with other work — I won't poll." That's it. Do not start polling.
 
-   When each background Agent completes, the runtime will surface its return value — include any blocker info in your response and ask what the user wants to do.
+7. **After all subagents return** (or on user request), restore each repo's main checkout to its original branch and prune any leftover worktrees:
+   ```bash
+   # For each repo touched:
+   git -C <path> checkout "$(cat /tmp/babysit-<repo>-original-branch 2>/dev/null || echo dev)"
+   git -C <path> worktree prune
+   ```
+   This leaves the user's environment in a sane state.
 
 ---
 
@@ -76,14 +92,45 @@ First, load the notification tool (one call, then proceed regardless of result):
 ToolSearch query="select:PushNotification" max_results=1
 ```
 
-Then:
+Status file:
 
 ```bash
-cd {path}
 echo '{"pr":{pr},"phase":"start"}' > /tmp/babysit-{pr}-status.json
 ```
 
-If `/tmp/babysit-{pr}-review-done` already exists, jump to Step 4. If `/tmp/babysit-{pr}-done` exists, exit immediately with `{"pr":{pr},"status":"already-done"}`.
+If `/tmp/babysit-{pr}-done` exists, exit immediately with `{"pr":{pr},"status":"already-done"}`.
+
+## Step 0.5 — set up isolated worktree (THIS IS WHY THE SKILL DOESN'T COLLIDE)
+
+Multiple PRs in the same repo would otherwise stomp on each other — each tries to `git checkout` a different branch in the same physical directory. To prevent that, every per-PR subagent works in its OWN git worktree.
+
+```bash
+WT="{path}--babysit-pr-{pr}"
+
+# Create worktree (idempotent — if it exists from a previous interrupted run, reuse it)
+if [ ! -d "$WT" ]; then
+  git -C {path} worktree add "$WT" {branch}
+fi
+
+cd "$WT"
+
+# Symlink node_modules from the main checkout — gates only READ from node_modules,
+# they never write. This avoids a 1-2 minute `npm install` per worktree. Safety
+# rule: NEVER run `npm install` / `npm ci` inside a worktree. If a gate complains
+# about a missing dependency, that's a real signal, not a setup failure.
+if [ ! -e ./node_modules ] && [ -d "{path}/node_modules" ]; then
+  ln -sf "{path}/node_modules" ./node_modules
+fi
+
+# Symlink .env (gitignored) so backend / frontend can read the right config.
+if [ ! -e ./.env ] && [ -f "{path}/.env" ]; then
+  ln -sf "{path}/.env" ./.env
+fi
+
+# (Optional, BE only) symlink .env.local / .env.development if your repo uses them.
+```
+
+For the rest of Steps 1–3, "the working tree" means `$WT`. If `/tmp/babysit-{pr}-review-done` already exists, you can skip Phase A entirely and jump to Step 4 — but you still need the worktree set up because Phase A's pushed commits live there.
 
 ## Step 1 — wait for Copilot's review (cap 30 min)
 
@@ -162,7 +209,7 @@ Whether or not you ran a fix in Step 2, you ALWAYS run gates at least once to co
 
 After gates green, release the lock immediately (`rm -rf /tmp/babysit-tests-{resource-name}.lock`) so other PRs can proceed — don't hold it through Step 4.
 
-## Step 4 — verify-manual-tests (Playwright lock)
+## Step 4 — verify-manual-tests (main-checkout branch dance + Playwright lock)
 
 First, check whether this PR has a `## Manual Testing` section at all:
 
@@ -172,7 +219,35 @@ gh pr view {pr} --repo {ghRepo} --json body -q '.body' | grep -q '## Manual Test
 
 If `SKIP_MT`, jump to Step 5 — there's nothing to drive Playwright through.
 
-Otherwise acquire the Playwright lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
+Otherwise: Phase B runs against the user's existing dev servers (which serve from `{path}` — the *main* checkout, not your worktree). So you need to (a) lock the main checkout against other PRs, (b) put it on this PR's branch so the dev server's --watch / HMR rebuilds, then (c) acquire Playwright and run the test. Releases happen in reverse.
+
+```bash
+# (a) Acquire main-checkout lock for THIS repo (not the worktree — the original)
+START=$(date +%s)
+until mkdir /tmp/babysit-main-{key}.lock 2>/dev/null; do
+  if [ $(( $(date +%s) - START )) -gt 14400 ]; then echo "MAIN_LOCK_TIMEOUT"; exit 1; fi
+  sleep 30
+done
+
+# (b) Verify main is clean — the user-precondition check from the calling session
+# could have raced with the user editing files in between
+DIRTY=$(git -C {path} status --porcelain)
+if [ -n "$DIRTY" ]; then
+  rmdir /tmp/babysit-main-{key}.lock
+  # BLOCKER — write status, skip Step 4, continue to Step 5 with tests:"0/N"
+  echo '{"pr":{pr},"phase":"phase-b-precheck","blocker":"main checkout {key} dirty: '"$DIRTY"' — please clean and re-invoke for this PR"}' > /tmp/babysit-{pr}-status.json
+  # SKIP forward to Step 5 (notification) and return BLOCKED
+fi
+
+# (c) Switch main to this PR's branch — the user's dev server (--watch / HMR) will rebuild
+git -C {path} checkout {branch}
+
+# Give the dev server time to pick up the change. For Next.js HMR ~3s; for BE
+# node --watch ~2s. Be generous — manual tests against stale code waste the run.
+sleep 8
+```
+
+Now acquire the Playwright lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
 
 ```bash
 START=$(date +%s)
@@ -186,14 +261,17 @@ trap 'rm -rf /tmp/babysit-playwright.lock' EXIT
 
 (LOCK_TIMEOUT after 4h means another PR's tests have been hung; give up gracefully.)
 
-With the lock held, invoke the `verify-manual-tests` skill via the `Skill` tool. Pass the PR number ({pr}) and repo ({ghRepo}). It runs inline, drives Playwright through the PR's `## Manual Testing` section, flips checkboxes, returns when done.
+With the lock held, invoke the `verify-manual-tests` skill via the `Skill` tool. Pass the PR number ({pr}) and repo ({ghRepo}). It runs inline, drives Playwright through the PR's `## Manual Testing` section against the user's existing dev servers, flips checkboxes, returns when done.
 
-After it returns:
+After it returns, release locks in reverse acquisition order:
 ```bash
 rm -rf /tmp/babysit-playwright.lock
+rm -rf /tmp/babysit-main-{key}.lock
 touch /tmp/babysit-{pr}-tested
 touch /tmp/babysit-{pr}-done
 ```
+
+Do NOT switch the main checkout back to its original branch — the calling session does that once at the end of the whole run, after all PRs finish (avoids needless thrash if the next PR's branch happens to share the same parent).
 
 ## Step 5 — fire completion notification
 
@@ -218,6 +296,17 @@ PushNotification(
 ```
 
 Keep the message under 120 chars so it renders cleanly in OS banners on all platforms. If `PushNotification` isn't available, skip this step silently.
+
+## Step 5.5 — clean up your worktree
+
+Before returning, prune the worktree you created in Step 0.5. Failure to do this leaves orphan worktrees that confuse future `git worktree list` calls.
+
+```bash
+cd /tmp  # leave the worktree dir before removing it
+git -C {path} worktree remove --force "{path}--babysit-pr-{pr}" 2>/dev/null || true
+```
+
+If the remove fails (e.g. you have uncommitted experimental changes you want to keep), DON'T retry forcibly — leave the worktree in place and add a note to the blockers list: `"worktree at <path> kept due to local-only changes; remove manually when reviewed"`. The calling session's final cleanup will skip it.
 
 ## Step 6 — final return
 
