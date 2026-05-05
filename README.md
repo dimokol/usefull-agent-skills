@@ -2,6 +2,8 @@
 
 A collection of Claude Code skills for AI-assisted development workflows. Each skill is a single self-contained markdown file you drop into `~/.claude/skills/`.
 
+> **Companion extension worth installing first if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts. See the `babysit-prs` section below for details.
+
 ---
 
 ## Install
@@ -76,12 +78,23 @@ End-to-end PR finalization for one or more open PRs. Spawns a **single backgroun
 The orchestrator pattern is the key win for **token economy**: only its single final return value lands in the calling session. Per-PR review chatter, tool calls, and intermediate summaries stay inside the subagents. The user can keep working in the parent session while it runs in the background.
 
 Highlights:
-- **One background dispatch from the main session, no per-PR direct dispatches** — keeps your conversation context tiny.
-- **`ScheduleWakeup 270s`** for Copilot polling — stays inside the prompt-cache window, no idle token burn.
-- **Per-PR push notifications** as each one completes (`READY ✅` or `BLOCKED ⚠`).
-- **Resume support** via `/tmp/babysit-<pr>-{review-done,tested}` markers — kill mid-run, re-invoke later, only the unfinished work is repeated.
-- **Stop conditions** include a 5-hour-rate-limit guard that catches 429s, best-effort `claude /usage` probe, and a "Phase A took >2.5h → don't start Phase B" heuristic so a long review run won't blow your token budget mid-test.
-- **Strict failure handling** — if a Copilot comment requires a product decision the orchestrator can't make alone, it surfaces as a blocker rather than guessing.
+- **One background subagent per PR, dispatched directly from the calling session** — flat architecture (no nested coordinator), each subagent self-contained. Keeps your conversation context to N short JSON returns.
+- **Atomic `mkdir` lock** on `/tmp/babysit-playwright.lock` serializes the manual-test phase across PRs (Playwright is single-instance) — no coordinator subagent needed.
+- **Per-PR completion notification** via `PushNotification` — pairs perfectly with [Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) (see below). Each PR completes → one OS banner with `<repo> #<pr> — READY ✅ | BLOCKED ⚠ <reason>`.
+- **Resume support** via `/tmp/babysit-<pr>-{review-done,tested,done}` markers — kill mid-run, re-invoke later, only the unfinished work is repeated. Per-PR status JSON at `/tmp/babysit-<pr>-status.json` shows in-flight state.
+- **Stop conditions** — 5-hour rate-limit guard (catches 429s gracefully), 4-hour wall-clock no-progress timeout, 3-strikes-on-the-same-operation rule.
+- **Strict failure handling** — if a Copilot comment requires a product decision the subagent can't make alone, it surfaces as a blocker rather than guessing.
+
+### 🔔 Strongly recommended pairing: Claude Notifications
+
+If you run multiple Claude Code sessions across multiple VS Code windows or terminals — and `babysit-prs` is the perfect scenario for that — install **[Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications)** (`dimokol.claude-notifications`). It's a game-changer for multi-agent multitasking:
+
+- **Per-PR sound + OS banner** (or in-VS-Code toast if focused) the moment each `babysit-prs` subagent completes — you don't have to keep the terminal in view to know when something needs attention.
+- **One-click terminal focus** — clicking the banner jumps you straight to the *exact* VS Code window and terminal tab where the agent fired the notification. No more hunting through 6 windows trying to remember which one was running which PR.
+- **Per-session stage-dedup** — exactly one notification per stage, never zero, never two. Each `babysit-prs` subagent has its own session_id, so per-PR notifications stay distinct without manual coordination.
+- Works on macOS, Windows, and Linux.
+
+Zero-config: `babysit-prs` already calls `PushNotification` at every per-PR completion; the extension picks it up via the standard Claude Code `Notification` hook. No flags, no setup.
 
 **Invocation:** `/babysit-prs <repo>:<pr> [<repo>:<pr> ...]` — e.g. `/babysit-prs be:188 fe:256 client:166`
 
