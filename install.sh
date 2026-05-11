@@ -11,9 +11,12 @@ set -euo pipefail
 REPO="https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
 SKILLS_AVAILABLE=(
-  "verify-manual-tests"
   "babysit-prs"
 )
+# Note: `verify-manual-tests` is deprecated — superseded by deterministic
+# Playwright e2e specs (`npm run test:e2e:full`). It is NOT installed by
+# default but can still be fetched explicitly via `bash install.sh verify-manual-tests`
+# if you want to read the tombstone.
 
 install_skill() {
   local skill="$1"

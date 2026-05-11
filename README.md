@@ -1,13 +1,15 @@
 # useful-agent-skills
 
-A collection of agent skills for AI-assisted development workflows. The skills are authored in Claude/Codex-style `SKILL.md` format and are oriented around specific PR-management workflows, but the workflows are reusable by any agent or harness that can load markdown skill instructions.
+A small collection of agent skills for AI-assisted development workflows. Authored in Claude/Codex-style `SKILL.md` format.
 
-Each skill is a single self-contained markdown file. Install it into the skill directory used by your agent:
+> ⚠️ **These skills were written for the [Ridebly](https://github.com/Knorcedger) monorepo's workflow.** They reference Ridebly-specific paths, port numbers (host `3100`/`4100` for the e2e stack), branch names (`dev`), and tooling assumptions. To reuse them elsewhere you **must** adjust those bits manually — every skill's body calls out exactly where. They are published here as a reference architecture, not a turnkey solution.
+
+Each skill is a single self-contained markdown file. Install into the skill directory your agent uses:
 
 - Claude Code: `~/.claude/skills/`
 - Codex: `~/.codex/skills/`
 
-> **Companion extension worth installing first if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts. See the `babysit-prs` section below for details.
+> **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts.
 
 ---
 
@@ -15,41 +17,28 @@ Each skill is a single self-contained markdown file. Install it into the skill d
 
 ### Claude Code one-liner
 
-Install a specific skill:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh | bash -s verify-manual-tests
-```
-
-Install all skills at once:
+Install all skills (default — current set is just `babysit-prs`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh | bash
+```
+
+Install a specific skill by name:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh | bash -s babysit-prs
 ```
 
 Then **restart Claude Code** (or open a new session) — skills are picked up on session start.
 
 ### Codex install
 
-Install all skills into Codex's skill directory:
-
 ```bash
 SKILLS_DIR="$HOME/.codex/skills" \
   bash <(curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh)
 ```
 
-Install a specific skill:
-
-```bash
-SKILLS_DIR="$HOME/.codex/skills" \
-  bash <(curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh) verify-manual-tests
-```
-
-Then **restart Codex** (or open a new session) — skills are picked up on session start.
-
 ### Manual install
-
-Skills are plain markdown files. Copy any skill directory to your agent's skills directory:
 
 ```bash
 AGENT_SKILLS_DIR="$HOME/.claude/skills" # or "$HOME/.codex/skills"
@@ -62,92 +51,62 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
 
 ## Skills
 
-### `verify-manual-tests` &nbsp;·&nbsp; *partially reusable*
-
-Automates the `## Manual Testing` checkboxes in a GitHub PR by driving running dev servers via Playwright MCP. Each checkbox is executed **inline** (no subagent overhead, no context-passing latency). Boxes flip to `[x]` only when the behavior is confirmed; failures are left unchecked with a clear explanation. The only edit to the PR body is the checkbox flip — no evidence tables, no timestamps, no "verified on" footers.
-
-Highlights:
-- **Idempotent** — re-runs skip every `[x]` box.
-- **Cheapest assertion wins** — `browser_evaluate` for known strings, `browser_snapshot` only for structural checks. Saves 80%+ of token-payload per assertion vs always-snapshot.
-- **Fixed failure-capture trio** — `console_messages` + `network_requests` + screenshot. Three calls per failure, no more.
-- **Auto-seed** with a 3-tier fallback (reuse existing → UI seed → DB seed script) and a hard 2-minute effort cap to prevent thrashing.
-- **Browser session reuse** across checkboxes (don't close/reopen between assertions).
-- **Bug-fix retry capped at 1** per checkbox; second failure → leave unchecked + report.
-
-**Trigger phrases:** "verify manual tests", "run PR manual tests", "check off the boxes", "auto-test PR #N"
-
-**Requirements:**
-- Claude Code with Playwright MCP enabled
-- `gh` CLI authenticated
-- Dev servers already running (the skill checks; it does not auto-start)
-- A PR with a `## Manual Testing` section using `- [ ]` checkboxes
-
-**To adapt to your project (the project-specific bits):**
-- Update the **dev-server ports** in Step 1 (currently `4000` / `3000` / `3001`).
-- Replace the **OTP / login flow** in Step 3 with whatever your auth pattern is — it currently fetches an OTP from MongoDB's `users.login.code` (Ridebly-specific).
-- Update the **screenshot artifacts path** if you don't want `<project>/.playwright-mcp/`.
-
-The general flow (preflight → fetch PR → auth → execute → seed → single body update → report) and all the token-economy rules are project-agnostic.
-
----
-
 ### `babysit-prs` &nbsp;·&nbsp; *mostly reusable*
 
-End-to-end PR finalization for one or more open PRs. Spawns a **single background orchestrator** that:
+End-to-end PR finalization for one or more open PRs. The calling session dispatches **one background subagent per PR** (parallel) and returns control immediately. Each subagent independently:
 
-1. **Phase A** — handles Copilot review for every PR in **parallel** (one background subagent per PR). Each one polls until Copilot's review lands, decides validity per the repo's CLAUDE.md PR-Workflow conventions, implements valid fixes, pushes, replies to every thread, and resolves them.
-2. **Phase B** — runs `verify-manual-tests` **sequentially** per PR (Playwright is single-instance).
-3. Returns one compact final report when every PR is merge-ready.
-
-The orchestrator pattern is the key win for **token economy**: only its single final return value lands in the calling session. Per-PR review chatter, tool calls, and intermediate summaries stay inside the subagents. The user can keep working in the parent session while it runs in the background.
+1. Waits for Copilot's review (cap 30 min).
+2. For every Copilot comment: reads the referenced code, judges validity per the repo's `CLAUDE.md` PR-Workflow conventions, fixes valid items (commit + push, no `--amend`), replies to every thread, resolves them.
+3. Runs the repo's quality gate (`lint && build` or `lint && typecheck && test`) inside an isolated git worktree.
+4. For FE PRs: runs the local Playwright e2e suite (`npm run test:e2e:full`). The harness boots its own ephemeral docker stack on host ports `3100`/`4100`, so a filesystem lock (`/tmp/babysit-e2e-stack.lock`) serializes the e2e step across concurrent PRs.
+5. Returns ONE JSON line: `{"pr": N, "status": "READY|BLOCKED", "applied": [...], "declined": N, "e2e": "X/Y", "blockers": [...]}`.
 
 Highlights:
-- **One background subagent per PR, dispatched directly from the calling session** — flat architecture (no nested coordinator), each subagent self-contained. Keeps your conversation context to N short JSON returns.
-- **Atomic `mkdir` lock** on `/tmp/babysit-playwright.lock` serializes the manual-test phase across PRs (Playwright is single-instance) — no coordinator subagent needed.
-- **Per-PR completion notification** via `PushNotification` — pairs perfectly with [Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) (see below). Each PR completes → one OS banner with `<repo> #<pr> — READY ✅ | BLOCKED ⚠ <reason>`.
-- **Resume support** via `/tmp/babysit-<pr>-{review-done,tested,done}` markers — kill mid-run, re-invoke later, only the unfinished work is repeated. Per-PR status JSON at `/tmp/babysit-<pr>-status.json` shows in-flight state.
-- **Stop conditions** — 5-hour rate-limit guard (catches 429s gracefully), 4-hour wall-clock no-progress timeout, 3-strikes-on-the-same-operation rule.
-- **Strict failure handling** — if a Copilot comment requires a product decision the subagent can't make alone, it surfaces as a blocker rather than guessing.
 
-### 🔔 Strongly recommended pairing: Claude Notifications
-
-If you run multiple Claude Code sessions across multiple VS Code windows or terminals — and `babysit-prs` is the perfect scenario for that — install **[Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications)** (`dimokol.claude-notifications`). It's a game-changer for multi-agent multitasking:
-
-- **Per-PR sound + OS banner** (or in-VS-Code toast if focused) the moment each `babysit-prs` subagent completes — you don't have to keep the terminal in view to know when something needs attention.
-- **One-click terminal focus** — clicking the banner jumps you straight to the *exact* VS Code window and terminal tab where the agent fired the notification. No more hunting through 6 windows trying to remember which one was running which PR.
-- **Per-session stage-dedup** — exactly one notification per stage, never zero, never two. Each `babysit-prs` subagent has its own session_id, so per-PR notifications stay distinct without manual coordination.
-- Works on macOS, Windows, and Linux.
-
-Zero-config: `babysit-prs` already calls `PushNotification` at every per-PR completion; the extension picks it up via the standard Claude Code `Notification` hook. No flags, no setup.
+- **Isolated worktrees per PR** — no main-checkout collisions. `node_modules` and `.env` are symlinked from the main checkout (never `npm install` inside a worktree).
+- **Resume support** via `/tmp/babysit-<pr>-{review-done,tested,done}` markers. Per-PR status JSON at `/tmp/babysit-<pr>-status.json`.
+- **Stop conditions** — 5-hour rate-limit guard, 4-hour wall-clock no-progress timeout, 3-strikes-on-the-same-op rule.
+- **Failure classification table** — auto-fix vs. report-blocker is explicit and bounded.
+- **Per-PR completion notification** via `PushNotification` — one banner per PR completion, pairs natively with the Claude Notifications extension below.
 
 **Invocation:** `/babysit-prs <repo>:<pr> [<repo>:<pr> ...]` — e.g. `/babysit-prs be:188 fe:256 client:166`
 
 **Trigger phrases:** "babysit", "finalize PRs", "ready for merge", "handle reviews and tests", "auto-handle PRs"
 
 **Requirements:**
-- `gh` CLI authenticated against the target GitHub repos
-- Working trees for each repo present at predictable paths (see "to adapt" below)
-- Dev servers running (Phase B delegates to `verify-manual-tests` which depends on this) — install that skill too
-- A `## Manual Testing` section in each PR body
-- Each repo's CLAUDE.md describes its PR Workflow (replies, resolves, quality gates) — the orchestrator reads from there
+- `gh` CLI authenticated against the target GitHub repos.
+- Git worktrees enabled (default).
+- For e2e: Docker daemon running; host ports `3100`/`4100` free.
+- Each repo's `CLAUDE.md` describes its PR Workflow — the orchestrator reads from there.
 
 **To adapt to your project:**
-- Replace the **Repo map** at the top of the skill (3 hardcoded entries: `be`, `fe`, `client` → ridebly paths + `Knorcedger/ridebly-*` GitHub repos).
-- Update the **quality-gate commands** in the orchestrator's Phase-A child task — currently `lint+typecheck+jest` for `be`, `lint+build` for `fe`/`client`.
-- Everything else (orchestrator architecture, marker scheme, stop conditions, token-budget rules, report format) is project-agnostic.
+- Replace the **Repo map** at the top of the skill (entries `be`/`fe`/`client` with Ridebly paths and `Knorcedger/ridebly-*` GitHub repos).
+- Update the **quality-gate commands** — currently `lint && typecheck && PORT=4001 npm test` for `be`, `lint && build` for `fe`/`client`.
+- Update the **e2e command + lock name** if your harness uses different ports or a different invocation than `npm run test:e2e:full` on ports `3100`/`4100`.
+- Update the **base-branch reference** (`dev`) and any other naming conventions your repo uses.
 
-If you have N projects with a similar layout, you can either swap the map or extend it (it's a small markdown table).
+Everything else (subagent architecture, marker scheme, stop conditions, JSON return format) is project-agnostic.
+
+### 🔔 Recommended pairing: Claude Notifications
+
+If you run multiple Claude Code sessions, install **[Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications)** (`dimokol.claude-notifications`):
+
+- Per-PR sound + OS banner the moment each `babysit-prs` subagent completes.
+- One-click terminal focus — jumps you straight to the exact VS Code window/tab where the agent fired.
+- Per-session stage-dedup — exactly one notification per stage, never zero, never two.
+- Works on macOS, Windows, and Linux.
+
+Zero-config: `babysit-prs` already calls `PushNotification` at every per-PR completion.
 
 ---
 
-## Both skills together
+### `verify-manual-tests` &nbsp;·&nbsp; ❌ *deprecated*
 
-Install `babysit-prs` and it'll automatically delegate Phase B to `verify-manual-tests` if you have it installed. They're designed to compose — `verify-manual-tests` runs standalone for one-off PR testing, and `babysit-prs` orchestrates it for multi-PR runs.
+Was: an LLM-in-loop runner that drove Playwright MCP through prose `## Manual Testing` checklists in a PR body.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh | bash
-# installs both skills
-```
+**Superseded by deterministic Playwright e2e specs.** When you can write `playwright/e2e/*.spec.ts` and run them with `npm run test:e2e:full`, there is no reason for an LLM to drive the browser — the spec *is* the test. The earlier `babysit-prs` invoked this skill in its Phase B; the current `babysit-prs` calls the e2e suite directly instead.
+
+The file is retained as a tombstone (`skills/verify-manual-tests/SKILL.md`) explaining the deprecation. Don't install it.
 
 ---
 
@@ -155,7 +114,7 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/i
 
 Skills are markdown files that compatible agents load on demand. When the user asks for something matching a skill's `description`, or invokes it by name, the agent reads the file and follows its instructions.
 
-Skills live at `<agent-skills-dir>/<skill-name>/SKILL.md`, for example `~/.claude/skills/<skill-name>/SKILL.md` or `~/.codex/skills/<skill-name>/SKILL.md`. Adding a new file there and restarting the session is all that's needed — no plugin registration or settings editing.
+Skills live at `<agent-skills-dir>/<skill-name>/SKILL.md`. Adding a new file there and restarting the session is all that's needed — no plugin registration or settings editing.
 
 **Skill metadata** (the YAML `name` + `description`) is loaded into every session's context (cheap — one line per skill). Skill **bodies** are only loaded when invoked, so you can have many skills installed without bloating context.
 

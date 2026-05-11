@@ -1,11 +1,19 @@
 ---
 name: babysit-prs
-description: End-to-end PR finalization for one or more open GitHub PRs. Spawns one background subagent per PR; each subagent independently handles Copilot review (parallel across PRs), then runs verify-manual-tests serialized by a filesystem lock (Playwright is single-instance), and reports a compact JSON status. Returns control to the calling session immediately so the user can keep working. Use when the user lists 1+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
+description: End-to-end PR finalization for one or more open GitHub PRs. Spawns one background subagent per PR; each subagent independently handles Copilot review (parallel across PRs), runs the repo's quality gate, and — for FE PRs — runs the local Playwright e2e suite (serialized by a filesystem lock because the harness binds host ports 3100/4100). Returns control to the calling session immediately. Use when the user lists 1+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
 ---
 
 # babysit-prs
 
 Take a list of open PRs to merge-ready autonomously. The calling session stays usable — N short-running background subagents do the actual work.
+
+## Project-specific assumptions (Ridebly)
+
+This skill was authored against the Ridebly monorepo. To reuse elsewhere, edit:
+
+- The **repo map** below.
+- The **e2e command + lock** in the per-PR task (Ridebly's FE uses `npm run test:e2e:full`, binds host ports 3100/4100, base branch `dev`).
+- Any base-branch references (`dev`).
 
 ## Invocation
 
@@ -14,127 +22,96 @@ Take a list of open PRs to merge-ready autonomously. The calling session stays u
 Each `<pr-spec>` is either:
 - `<repo-key>:<pr-number>` — e.g. `be:188`
 - A full GitHub PR URL — e.g. `https://github.com/Knorcedger/ridebly-be/pull/188`
-- A bare PR number — only allowed when ALL specs in the list are bare and the user follows up to clarify which repo (or you can infer it from `gh pr view <n> --repo <each>` probing)
+- A bare PR number — only allowed when ALL specs in the list are bare and the user clarifies which repo
 
 ## Repo map
 
-Treat this as the source of truth. To adapt the skill to a different project, just edit this table.
-
-| Key | Path | GitHub repo | Quality gate command | Shared resources held by gate |
-|-----|------|-------------|----------------------|-------------------------------|
-| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` | `npm run lint && npm run typecheck && PORT=4001 npm test` | `be-test-db` (TEST MongoDB is wiped on each suite boot — concurrent BE tests collide) |
-| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` | `npm run lint && npm run build` | none |
-| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` | `npm run lint && npm run build` | none |
-
-The `playwright` resource is held during `verify-manual-tests` for any PR with a `## Manual Testing` section, regardless of repo.
+| Key | Path | GitHub repo | Quality gate command | Has e2e suite? | Shared resources held by gate |
+|-----|------|-------------|----------------------|----------------|-------------------------------|
+| `be` | `~/Documents/Flarmio/Projects/ridebly/ridebly-be` | `Knorcedger/ridebly-be` | `npm run lint && npm run typecheck && PORT=4001 npm test` | no | `be-test-db` (TEST MongoDB is wiped on each suite boot) |
+| `fe` | `~/Documents/Flarmio/Projects/ridebly/ridebly-fe` | `Knorcedger/ridebly-fe` | `npm run lint && npm run build` | **yes** — `npm run test:e2e:full` | `e2e-stack` (host ports 3100/4100 — docker compose, single binding) |
+| `client` | `~/Documents/Flarmio/Projects/ridebly/ridebly-client` | `Knorcedger/ridebly-client` | `npm run lint && npm run build` | no | none |
 
 ## Procedure (calling session)
 
-1. **Parse + normalize** the PR list. For each entry, resolve to `{key, ghRepo, path, gateCmd, pr}`. URL: extract `owner/repo` from path, match into the repo map. `repo:pr`: direct lookup. Bare numbers: ask the user.
+1. **Parse + normalize** the PR list to `{key, ghRepo, path, gateCmd, hasE2E, e2eCmd, pr}`.
 
 2. **Validate + filter:**
    ```bash
    gh pr view <pr> --repo <ghRepo> --json state,headRefName -q '{state,head:.headRefName}'
    ```
-   Skip PRs that are not `OPEN`. Tell the user which were skipped. Also skip any PR for which `/tmp/babysit-<pr>-done` exists (resume support — re-runs do nothing for already-completed PRs).
+   Skip PRs that are not `OPEN`. Skip any PR for which `/tmp/babysit-<pr>-done` exists.
 
-3. **Precondition: main checkouts must be clean.** Phase B serializes on each repo's *main* working tree (Playwright runs against the user's existing dev servers, which point at the main checkout). For each repo touched by the PR list:
+3. **Clean stale locks:**
    ```bash
-   git -C <path> status --porcelain
-   ```
-   If non-empty, REFUSE to dispatch. Tell the user precisely what's dirty (path + filename) and ask them to commit, stash, or restore before re-invoking. Do NOT auto-stash — those changes are theirs.
-
-   Save each repo's current branch (for restore at end of run): `git -C <path> rev-parse --abbrev-ref HEAD > /tmp/babysit-<repo>-original-branch`.
-
-4. **Clean stale locks** (defensive — don't inherit leftovers from a crashed previous run):
-   ```bash
-   for lock in /tmp/babysit-playwright.lock /tmp/babysit-tests-*.lock /tmp/babysit-main-*.lock; do
+   for lock in /tmp/babysit-e2e-stack.lock /tmp/babysit-tests-*.lock; do
      [ -d "$lock" ] && rmdir "$lock" 2>/dev/null
    done
    ```
 
-5. **Dispatch one background `general-purpose` Agent per remaining PR.** Each gets the entire `## Per-PR subagent task` block below as its prompt, with placeholders substituted. Use `run_in_background: true`. Dispatch all of them in a single message (parallel).
+4. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted. Use `run_in_background: true`. Send all dispatches in a single message.
 
-6. **Hand control back to the user.** One sentence: "Dispatched N agents. Each works in its own git worktree at `<path>--babysit-pr-<pr>`. They'll write status to /tmp/babysit-<pr>-status.json and return a JSON line. Continue with other work — I won't poll." That's it. Do not start polling.
+5. **Hand control back to the user.** One sentence: "Dispatched N agents in worktrees under `<path>--babysit-pr-<pr>`. Status lands in `/tmp/babysit-<pr>-status.json`. Continue with other work — I won't poll."
 
-7. **After all subagents return** (or on user request), restore each repo's main checkout to its original branch and prune any leftover worktrees:
+6. **After all subagents return** (or on user request), prune leftover worktrees:
    ```bash
-   # For each repo touched:
-   git -C <path> checkout "$(cat /tmp/babysit-<repo>-original-branch 2>/dev/null || echo dev)"
-   git -C <path> worktree prune
+   for path in <each touched repo>; do
+     git -C "$path" worktree prune
+   done
    ```
-   This leaves the user's environment in a sane state.
+
+The calling session never modifies the user's main checkouts — every subagent works in its own worktree. No branch switching of the main checkout is required (deterministic e2e specs replace the Playwright-MCP "drive the live dev server" flow that the old verify-manual-tests skill used).
 
 ---
 
 ## Per-PR subagent task (passed verbatim with placeholders substituted)
 
-> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{gateCmd}`, `{branch}`.
+> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{gateCmd}`, `{hasE2E}` (`true`/`false`), `{e2eCmd}`, `{branch}`.
 
-You are a PR babysitter for ONE pull request. Your job is to take it from "open with potentially-pending Copilot review" to "merge-ready", then exit with a single-line JSON status.
+You are a PR babysitter for ONE pull request. Take it from "open with potentially-pending Copilot review" to "merge-ready", then return ONE JSON status line.
 
 **PR:** {pr} on {ghRepo}, branch `{branch}`, working tree at `{path}`.
-**Quality gate command (run from {path}):** `{gateCmd}`
+**Quality gate (from worktree):** `{gateCmd}`
+**E2E suite:** {hasE2E} ({e2eCmd} when true)
 
-## NON-NEGOTIABLE RULES — read first
+## NON-NEGOTIABLE RULES
 
-1. **Execute. Do not narrate. Do not plan out loud.** Every sentence in your response that isn't a tool call wastes tokens.
-2. **Do not bail because a tool seems unavailable.** Deferred tools you'll need: `PushNotification` (for the per-PR completion alert). Load it ONCE at the very start with `ToolSearch query="select:PushNotification" max_results=1`. If `ToolSearch` itself fails or `PushNotification` won't load, skip just that one notification step — do NOT abort the whole task. Required tools that are always present: `Bash`, `Read`, `Edit`, `Write`, `Skill`. Polling = `Bash run_in_background` + `until` loop. Status updates = write to a file.
-3. **Never invoke another subagent.** You are the leaf — do everything inline.
-4. **Failure to make forward progress is not a valid outcome.** If something looks blocked, write a precise blocker to `/tmp/babysit-{pr}-status.json` and exit cleanly — do not produce vague speculation.
-5. **Status file is your truth source.** Write `/tmp/babysit-{pr}-status.json` after every meaningful checkpoint so a re-run can resume.
+1. **Execute. Do not narrate.** Every sentence that isn't a tool call wastes tokens.
+2. **Load `PushNotification` once at start** via `ToolSearch query="select:PushNotification" max_results=1`. If unavailable, skip the notification step at the end — do not abort.
+3. **Never invoke another subagent.** You are the leaf.
+4. **Status file is your truth source.** Write `/tmp/babysit-{pr}-status.json` after every meaningful checkpoint.
+5. **No `--no-verify`, no `--amend`.** Every fix is a new commit.
 
 ## Step 0 — initialize
-
-First, load the notification tool (one call, then proceed regardless of result):
 
 ```
 ToolSearch query="select:PushNotification" max_results=1
 ```
 
-Status file:
-
 ```bash
 echo '{"pr":{pr},"phase":"start"}' > /tmp/babysit-{pr}-status.json
+[ -f /tmp/babysit-{pr}-done ] && { echo '{"pr":{pr},"status":"already-done"}'; exit 0; }
 ```
 
-If `/tmp/babysit-{pr}-done` exists, exit immediately with `{"pr":{pr},"status":"already-done"}`.
-
-## Step 0.5 — set up isolated worktree (THIS IS WHY THE SKILL DOESN'T COLLIDE)
-
-Multiple PRs in the same repo would otherwise stomp on each other — each tries to `git checkout` a different branch in the same physical directory. To prevent that, every per-PR subagent works in its OWN git worktree.
+## Step 0.5 — isolated worktree
 
 ```bash
 WT="{path}--babysit-pr-{pr}"
-
-# Create worktree (idempotent — if it exists from a previous interrupted run, reuse it)
 if [ ! -d "$WT" ]; then
   git -C {path} worktree add "$WT" {branch}
 fi
-
 cd "$WT"
-
-# Symlink node_modules from the main checkout — gates only READ from node_modules,
-# they never write. This avoids a 1-2 minute `npm install` per worktree. Safety
-# rule: NEVER run `npm install` / `npm ci` inside a worktree. If a gate complains
-# about a missing dependency, that's a real signal, not a setup failure.
-if [ ! -e ./node_modules ] && [ -d "{path}/node_modules" ]; then
-  ln -sf "{path}/node_modules" ./node_modules
-fi
-
-# Symlink .env (gitignored) so backend / frontend can read the right config.
-if [ ! -e ./.env ] && [ -f "{path}/.env" ]; then
-  ln -sf "{path}/.env" ./.env
-fi
-
-# (Optional, BE only) symlink .env.local / .env.development if your repo uses them.
+[ ! -e ./node_modules ] && [ -d "{path}/node_modules" ] && ln -sf "{path}/node_modules" ./node_modules
+[ ! -e ./.env ]         && [ -f "{path}/.env" ]         && ln -sf "{path}/.env" ./.env
 ```
 
-For the rest of Steps 1–3, "the working tree" means `$WT`. If `/tmp/babysit-{pr}-review-done` already exists, you can skip Phase A entirely and jump to Step 4 — but you still need the worktree set up because Phase A's pushed commits live there.
+**NEVER** run `npm install` / `npm ci` inside a worktree. Missing dependencies in a worktree = real signal, not setup failure.
+
+For the rest of the steps, "the working tree" means `$WT`.
 
 ## Step 1 — wait for Copilot's review (cap 30 min)
 
-Use `Bash run_in_background` with this exact pattern:
+If `/tmp/babysit-{pr}-review-done` exists, skip to Step 3.
 
 ```bash
 START=$(date +%s)
@@ -145,9 +122,9 @@ done
 echo "REVIEW_FOUND"
 ```
 
-Use `BashOutput` to check for `REVIEW_FOUND` or `TIMEOUT`. If TIMEOUT, write `{"pr":{pr},"phase":"review-wait","blocker":"copilot review never arrived in 30 min"}` to status, skip to Step 4 (manual tests can still run).
+Run as `Bash run_in_background`; poll with `BashOutput`. On TIMEOUT, write `{"phase":"review-wait","blocker":"copilot review never arrived in 30 min"}` to status and skip to Step 3 (gates can still run).
 
-## Step 2 — fetch + handle Copilot comments
+## Step 2 — handle Copilot comments
 
 ```bash
 gh api repos/{ghRepo}/pulls/{pr}/comments \
@@ -157,234 +134,168 @@ gh api repos/{ghRepo}/pulls/{pr}/comments \
 
 For each top-level comment (skip ones with non-null `in_reply_to_id`):
 
-a) `Read` the file at the line referenced.
-
-b) Decide validity per the repo's CLAUDE.md PR-Workflow conventions (you're in `{path}` so the harness already loaded it). Use judgment — Copilot is often wrong about niche or context-dependent items.
-
-c) **If valid**: implement the fix. After all valid fixes for THIS PR, run `{gateCmd}` from `{path}`. If gates pass, commit (no `--no-verify`, no `--amend`) and push:
+a) `Read` the referenced file/line.
+b) Judge validity per the repo's `CLAUDE.md` PR-Workflow conventions (loaded automatically since you're in `{path}`). Copilot is often wrong on context-dependent items.
+c) **If valid**: implement the fix. After all valid fixes, run `{gateCmd}` (with the lock dance from Step 3 if applicable). If green, commit + push:
    ```bash
    git add -A && git commit -m "fix: address Copilot review on PR #{pr}" && git push
    ```
-   Capture the commit hash for the reply.
-
+   Capture the commit hash.
 d) **Reply** to the thread:
    ```bash
-   gh api -X POST repos/{ghRepo}/pulls/{pr}/comments/<comment-id>/replies \
+   gh api -X POST repos/{ghRepo}/pulls/{pr}/comments/<id>/replies \
      -f body='<commit hash + 1-line rationale OR clear non-applying reason>'
    ```
-
 e) **Resolve** the thread:
    ```bash
    gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<node_id>"}){thread{id}}}'
    ```
 
-After every comment is replied to + resolved:
-- Touch `/tmp/babysit-{pr}-review-done`
-- Write status: `{"pr":{pr},"phase":"review-done","applied":["<sha>",...],"declined":N,"blockers":[...]}`
+After all comments handled:
+```bash
+touch /tmp/babysit-{pr}-review-done
+echo '{"pr":{pr},"phase":"review-done","applied":[...],"declined":N}' > /tmp/babysit-{pr}-status.json
+```
 
-## Step 3 — verify quality gates (no Copilot fix path)
+## Step 3 — quality gate
 
-If your repo holds a shared-resource gate (see the "Shared resources held by gate" column in the repo map), acquire that lock before running `{gateCmd}`:
+If the repo map says this repo's gate holds a shared resource (e.g. `be-test-db`), acquire its lock:
 
 ```bash
-# Only if the repo map says this repo's gate touches a shared resource (e.g. `be-test-db`)
 START=$(date +%s)
-until mkdir /tmp/babysit-tests-{resource-name}.lock 2>/dev/null; do
+until mkdir /tmp/babysit-tests-{resource}.lock 2>/dev/null; do
   if [ $(( $(date +%s) - START )) -gt 3600 ]; then echo "GATE_LOCK_TIMEOUT"; exit 1; fi
   sleep 30
 done
-echo "$$" > /tmp/babysit-tests-{resource-name}.lock/owner-pid
-trap 'rm -rf /tmp/babysit-tests-{resource-name}.lock' EXIT
+trap 'rm -rf /tmp/babysit-tests-{resource}.lock' EXIT
 ```
 
-For Ridebly's `be` repo this means `mkdir /tmp/babysit-tests-be-test-db.lock`. Other repos: skip the lock entirely.
+Run `{gateCmd}` from `$WT`. Classify failures:
 
-Then run `{gateCmd}`. If it fails, classify the failure before bailing:
+- **Resource collision** (DB wiped mid-run, "duplicate key on startup") → re-acquire lock, retry once.
+- **Your own change in Step 2 broke it** → fix, commit, push, retry. Hard cap 3 fix attempts.
+- **Pre-existing breakage on the branch** → write blocker, skip Step 4.
 
-- **Looks like resource collision** (e.g. test output shows MongoDB connection wiped, fixtures reset mid-run, "tests clear all collections on startup"): you didn't have the lock or the lock dance failed. Wait 30s, re-acquire, re-run ONCE.
-- **Fail from your own change in Step 2**: read the error, fix it in code, commit + push as an extra commit, re-run gates.
-- **Fail from pre-existing brokenness on the branch**: write a blocker `{"blocker":"gate failing pre-existing on <branch>: <one-line summary>"}` and skip Step 4.
+Release lock immediately after green (`rm -rf /tmp/babysit-tests-{resource}.lock; trap - EXIT`). Always run gates at least once.
 
-Whether or not you ran a fix in Step 2, you ALWAYS run gates at least once to confirm green-on-merge.
+## Step 4 — e2e suite (FE only, serialized)
 
-After gates green, release the lock immediately (`rm -rf /tmp/babysit-tests-{resource-name}.lock`) so other PRs can proceed — don't hold it through Step 4.
+**Skip entirely if `{hasE2E}` is `false`.**
 
-## Step 4 — verify-manual-tests (main-checkout branch dance + Playwright lock)
-
-First, check whether this PR has a `## Manual Testing` section at all:
-
-```bash
-gh pr view {pr} --repo {ghRepo} --json body -q '.body' | grep -q '## Manual Testing' && echo "HAS_MT" || echo "SKIP_MT"
-```
-
-If `SKIP_MT`, jump to Step 5 — there's nothing to drive Playwright through.
-
-Otherwise: Phase B runs against the user's existing dev servers (which serve from `{path}` — the *main* checkout, not your worktree). So you need to (a) lock the main checkout against other PRs, (b) put it on this PR's branch so the dev server's --watch / HMR rebuilds, then (c) acquire Playwright and run the test. Releases happen in reverse.
-
-```bash
-# (a) Acquire main-checkout lock for THIS repo (not the worktree — the original)
-START=$(date +%s)
-until mkdir /tmp/babysit-main-{key}.lock 2>/dev/null; do
-  if [ $(( $(date +%s) - START )) -gt 14400 ]; then echo "MAIN_LOCK_TIMEOUT"; exit 1; fi
-  sleep 30
-done
-
-# (b) Verify main is clean — the user-precondition check from the calling session
-# could have raced with the user editing files in between
-DIRTY=$(git -C {path} status --porcelain)
-if [ -n "$DIRTY" ]; then
-  rmdir /tmp/babysit-main-{key}.lock
-  # BLOCKER — write status, skip Step 4, continue to Step 5 with tests:"0/N"
-  echo '{"pr":{pr},"phase":"phase-b-precheck","blocker":"main checkout {key} dirty: '"$DIRTY"' — please clean and re-invoke for this PR"}' > /tmp/babysit-{pr}-status.json
-  # SKIP forward to Step 5 (notification) and return BLOCKED
-fi
-
-# (c) Switch main to this PR's branch — the user's dev server (--watch / HMR) will rebuild
-git -C {path} checkout {branch}
-
-# Give the dev server time to pick up the change. For Next.js HMR ~3s; for BE
-# node --watch ~2s. Be generous — manual tests against stale code waste the run.
-sleep 8
-```
-
-Now acquire the Playwright lock atomically (POSIX `mkdir` is atomic — exactly one waiter wins per attempt):
+The e2e harness boots an ephemeral docker stack on host ports 3100/4100 — only one PR's suite can run at a time on this machine.
 
 ```bash
 START=$(date +%s)
-until mkdir /tmp/babysit-playwright.lock 2>/dev/null; do
-  if [ $(( $(date +%s) - START )) -gt 14400 ]; then echo "LOCK_TIMEOUT"; exit 1; fi
+until mkdir /tmp/babysit-e2e-stack.lock 2>/dev/null; do
+  if [ $(( $(date +%s) - START )) -gt 14400 ]; then
+    echo '{"pr":{pr},"phase":"step4","blocker":"e2e-stack lock wait timed out after 4h"}' > /tmp/babysit-{pr}-status.json
+    exit 0
+  fi
   sleep 30
 done
-echo "$$" > /tmp/babysit-playwright.lock/owner-pid
-trap 'rm -rf /tmp/babysit-playwright.lock' EXIT
+echo "$$" > /tmp/babysit-e2e-stack.lock/owner-pid
+trap 'rm -rf /tmp/babysit-e2e-stack.lock' EXIT
 ```
 
-(LOCK_TIMEOUT after 4h means another PR's tests have been hung; give up gracefully.)
+Run `{e2eCmd}` from `$WT`. The wrapper boots its own stack, seeds, runs the suite, tears down. No need to touch the user's dev servers.
 
-With the lock held, invoke the `verify-manual-tests` skill via the `Skill` tool. Pass the PR number ({pr}) and repo ({ghRepo}). It runs inline, drives Playwright through the PR's `## Manual Testing` section against the user's existing dev servers, flips checkboxes, returns when done.
+On failure:
+- **Spec failure looks like a real bug in PR-touched code** → read the failing spec + the source it covers, implement the obvious fix, commit `fix: <one-line> — found via e2e on PR #{pr}`, push, re-run the affected spec via `npx playwright test <spec>` inside the worktree. Hard cap 3 attempts per failing spec, the 3rd must be a *different* fix.
+- **Spec failure looks like flakiness / infra** (port already bound, mongo connection refused on first try) → tear down (`docker compose -f docker-compose.test.yml down -v`), re-run `{e2eCmd}` once.
+- **Pre-existing failing spec on the branch** → write blocker `"e2e failing pre-existing on {branch}: <spec name>"` and continue.
 
-After it returns, release locks in reverse acquisition order:
+After green, release the lock immediately:
 ```bash
-rm -rf /tmp/babysit-playwright.lock
-rm -rf /tmp/babysit-main-{key}.lock
+rm -rf /tmp/babysit-e2e-stack.lock; trap - EXIT
 touch /tmp/babysit-{pr}-tested
+```
+
+## Step 5 — completion
+
+```bash
 touch /tmp/babysit-{pr}-done
 ```
 
-Do NOT switch the main checkout back to its original branch — the calling session does that once at the end of the whole run, after all PRs finish (avoids needless thrash if the next PR's branch happens to share the same parent).
-
-## Step 5 — fire completion notification
-
-If `PushNotification` was loaded successfully in Step 0, call it ONCE before returning. This is the per-PR alert the user is waiting for — it triggers their Claude Notifications extension (or any other notification hook they have) and surfaces an OS banner with a clickable focus action.
-
-Pick the title/message based on the final status:
+If `PushNotification` was loaded, fire once:
 
 ```
 PushNotification(
   title="babysit-prs",
-  message="{ghRepo} #{pr} — READY ✅"
+  message="{ghRepo} #{pr} — READY ✅"   # or "BLOCKED ⚠ <one-sentence reason>"
 )
 ```
 
-or, if blocked:
+Keep the message under 120 chars.
 
-```
-PushNotification(
-  title="babysit-prs",
-  message="{ghRepo} #{pr} — BLOCKED ⚠ <one-sentence reason>"
-)
-```
-
-Keep the message under 120 chars so it renders cleanly in OS banners on all platforms. If `PushNotification` isn't available, skip this step silently.
-
-## Step 5.5 — clean up your worktree
-
-Before returning, prune the worktree you created in Step 0.5. Failure to do this leaves orphan worktrees that confuse future `git worktree list` calls.
+## Step 5.5 — prune worktree
 
 ```bash
-cd /tmp  # leave the worktree dir before removing it
+cd /tmp
 git -C {path} worktree remove --force "{path}--babysit-pr-{pr}" 2>/dev/null || true
 ```
 
-If the remove fails (e.g. you have uncommitted experimental changes you want to keep), DON'T retry forcibly — leave the worktree in place and add a note to the blockers list: `"worktree at <path> kept due to local-only changes; remove manually when reviewed"`. The calling session's final cleanup will skip it.
+If remove fails (uncommitted experimental changes), add a blocker note `"worktree at <path> kept due to local-only changes"` — don't force.
 
-## Step 6 — final return
-
-Return EXACTLY ONE JSON line, nothing else, no narration before or after:
+## Step 6 — return ONE JSON line
 
 ```json
-{"pr": {pr}, "status": "READY|BLOCKED", "applied": ["sha", ...], "declined": N, "tests": "X/Y", "blockers": ["short reasons", ...]}
+{"pr": {pr}, "status": "READY|BLOCKED", "applied": ["sha", ...], "declined": N, "e2e": "X/Y or skipped", "blockers": ["reasons", ...]}
 ```
 
-`status` is `READY` only when (1) all Copilot threads replied + resolved, (2) gates green, (3) every `- [ ]` in the PR's `## Manual Testing` is `- [x]`. Otherwise `BLOCKED`.
+`READY` requires: (1) all Copilot threads replied + resolved, (2) gates green, (3) e2e green or N/A. Otherwise `BLOCKED`.
 
 ---
 
-## Stop conditions (each per-PR subagent)
+## Stop conditions
 
-- **5-hour rate-limit guard.** If any tool call returns a 429 / "rate limit" / "usage limit" error, write a blocker `{"phase": "<current>", "blocker": "rate limit hit"}` to status and exit cleanly — do not retry.
-- 4 hours wall-clock with no marker advancing → write blocker, exit.
-- Same individual operation fails 3× in a row WITH 3 DIFFERENT recovery strategies → write blocker for that operation only, continue to the next.
-- A Copilot comment requires a product decision you can't make alone → reply to the thread saying so + leave it unresolved + add to blockers list. Do NOT resolve threads you skipped.
+- **5-hour rate-limit guard.** On any 429 / "rate limit" / "usage limit" error, write blocker and exit cleanly.
+- 4 hours wall-clock with no marker advancing → blocker, exit.
+- Same individual operation fails 3× with 3 different recovery strategies → blocker for that item only, continue.
+- Copilot comment requires a product decision → reply saying so, leave unresolved, add to blockers, don't resolve.
 
-## Failure classification — when to fix vs report
+## Failure classification
 
-The defining principle: **never bail without trying**. Either fix it (in-scope, local) or report a precise one-line recovery command (the action belongs to the user's domain). Don't just say "tests failed" and exit — that wastes the run.
-
-### AUTO-FIX — implement, push, retry (don't ask)
+**AUTO-FIX — implement, push, retry:**
 
 | Symptom | Action |
 |---|---|
-| Test failures with N collisions, fixtures wiped mid-run, "duplicate key on startup" | Resource-collision pattern. Acquire the relevant lock from Step 3, re-run gates serially. |
-| Lint / typecheck / build error introduced by your own commit in Step 2 | Read the error, fix it, commit as an extra patch, re-run. |
-| `verify-manual-tests` finds a real bug in PR-touched code (e.g. dialog state not reloading after save, raw enum shown instead of formatted label) | Read the relevant file, implement the obvious fix, commit `fix: <one-line> — found via PR #{pr} manual test`, push, re-run that checkbox. Hard cap: 3 attempts per checkbox, the 3rd must be a *different* fix. |
-| Missing test data (no reservations exist for "open a reservation" checkbox) | Use the verify-manual-tests Step 5 3-tier seed protocol. |
-| Transient gh / git network blip | Wait 10s, retry once. |
+| Test failures with collisions / fixtures wiped mid-run | Resource lock dance, retry once. |
+| Lint / typecheck / build error from your own Step 2 commit | Fix, commit, push, re-run. |
+| e2e spec finds a real bug in PR-touched code | Fix per Step 4 (cap 3 attempts). |
+| Transient gh / git / docker network blip | Wait 10s, retry once. |
 
-### REPORT BLOCKER — do NOT touch (the user owns this)
+**REPORT BLOCKER — do NOT touch:**
 
-| Symptom | Blocker line in your status |
+| Symptom | Blocker line |
 |---|---|
-| `Cannot find module './vendor-chunks/*.js'` (stale Next.js cache) | `"stale .next in <repo> — run 'rm -rf <repo>/.next' and restart your 'npm run dev', then re-invoke /babysit-prs"` |
-| Dev server returns 502 / connection refused | `"<repo> dev server (port <n>) is down — please 'npm run dev', then re-invoke"` |
-| Database schema out of sync with code (e.g. unknown collection / missing field) | `"DB schema mismatch in <repo> — needs migration, manual review required"` |
-| Copilot comment requires design / product decision | `"PR #{pr} thread <url>: needs your call — <one-line summary>"` |
-| Fix would expand scope (cross-cutting refactor, dep upgrade, schema migration, > ~5 files) | `"out of scope for this PR — suggest follow-up PR for <what>"` |
+| `Cannot find module './vendor-chunks/*.js'` | `"stale .next in <repo> — run 'rm -rf <repo>/.next'"` |
+| Docker daemon not running | `"docker daemon down — please start Docker"` |
+| Host port 3100 or 4100 already bound by user's dev | `"port 3100/4100 in use — stop competing process and re-invoke"` |
+| Database schema out of sync | `"DB schema mismatch — needs migration, manual review"` |
+| Copilot comment needs design / product decision | `"PR #{pr} thread <url>: needs your call — <one-line summary>"` |
+| Fix would expand scope (cross-cutting refactor, dep upgrade, schema migration, > ~5 files) | `"out of scope — suggest follow-up PR for <what>"` |
 
 ### KEY DISTINCTION
 
-You own: code under `{path}` (the PR's working tree), gh API, git, your own background processes.
-User owns: dev servers running on the host, build caches (`.next`, `dist`, `node_modules` reinstall), DB schemas, anything they explicitly asked you not to touch.
-
-If a fix would require touching anything in the user-owned column, write the blocker with the exact recovery command and move to the next thing. Don't pause the whole subagent waiting — just blocker that one item and continue.
+You own: code under `$WT`, gh API, git, your background processes, the ephemeral docker stack you boot.
+User owns: their host dev servers, build caches (`.next`, `dist`), DB schemas, the docker daemon itself.
 
 ---
 
 ## Token-economy notes (calling session perspective)
 
-- Calling session does N background `Agent` dispatches in one message. Each dispatch is ~2KB of prompt; total dispatch cost is bounded.
-- Each subagent returns ONE JSON line (~250 chars). Total return cost: N × 250 chars.
-- All gh / git / file work happens inside subagent contexts — your session never reads the repo files.
-- `verify-manual-tests` runs INSIDE each subagent (not as a sub-subagent), inheriting that skill's own efficient tool-use rules.
-- Marker files in `/tmp/` provide resume support. To wipe and re-run cleanly: `rm /tmp/babysit-*`.
+- N background dispatches in one message, ~2KB each.
+- Each subagent returns ONE JSON line (~250 chars).
+- All gh / git / file work happens inside subagent contexts.
+- Marker files in `/tmp/` provide resume. Wipe: `rm /tmp/babysit-*`.
 
-## Plays nicely with Claude Code notification extensions
+## Notification extension integration
 
-If the user has a Claude Code notification extension installed (e.g. `dimokol.claude-notifications` / "Claude Notifications" — VS Code marketplace), each per-PR completion fires `PushNotification` from inside the per-PR subagent. That hits the extension's `Notification` hook with the message above, and the user gets:
+If a Claude Code notification extension is installed (e.g. `dimokol.claude-notifications`), each per-PR completion fires `PushNotification`. The extension treats each subagent's `session_id` as a distinct stage, so N PRs → N completion banners, no dedup. Token cost: ~80 tokens per PR.
 
-- Sound + OS banner (or in-window toast if VS Code is focused).
-- A clickable "Focus Terminal" action that jumps to the calling session's terminal.
-- Stage-dedup: each subagent has a distinct `session_id`, so the extension treats every PR completion as a fresh stage — no incorrect suppression, no duplicate noise.
-
-Net behavior:
-- N background subagents → exactly N completion notifications (one per PR), each with a tailored "READY ✅ / BLOCKED ⚠" message.
-- The calling (parent) session's eventual `Stop` hook fires its own notification when the user's next idle-after-everything-completes moment arrives — that's the natural "all done" prompt.
-
-**Token cost of this integration: one `ToolSearch` + one `PushNotification` per subagent (≈80 tokens total per PR).** Everything else is the extension's job.
-
-If no notification extension is installed, the user just sees no banners — the workflow itself isn't affected. The PR list still lands in the parent session via the JSON returns.
+If no extension is installed: no banners, workflow unaffected, results still land in the parent session via JSON returns.
 
 ## When to use vs not
 
-**Use when:** 1+ open PRs need both Copilot-review handling and manual testing taken to merge-ready.
-**Don't use when:** PR has no Copilot review enabled AND no `## Manual Testing` section — there's nothing to babysit. Run `verify-manual-tests` directly for a single test pass.
+**Use when:** 1+ open PRs need Copilot-review handling and/or e2e verification taken to merge-ready.
+**Don't use when:** PR has no Copilot review AND no e2e coverage applicable — there's nothing to babysit. Run `{gateCmd}` directly.
