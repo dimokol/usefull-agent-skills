@@ -12,6 +12,7 @@ REPO="https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
 SKILLS_AVAILABLE=(
   "babysit-prs"
+  "e2e-harness-patterns"
 )
 # Note: `verify-manual-tests` is deprecated — superseded by deterministic
 # Playwright e2e specs (`npm run test:e2e:full`). It is NOT installed by

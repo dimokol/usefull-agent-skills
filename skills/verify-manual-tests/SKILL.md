@@ -27,16 +27,6 @@ Both run an ephemeral docker stack (mongo + backend + frontend) seeded with a kn
 
 That's the whole replacement: **two commands**. No skill layer needed for "run the tests, read the output, fix what's broken" — that's just normal agent behavior.
 
-## Caveat — these skills were written for Ridebly's workflow
-
-This whole repo (`usefull-agent-skills`) was developed against the Ridebly monorepo. The harness commands, port numbers (`3100`/`4100`), seed-fixture conventions, and PR-template assumptions are specific to that project. Anyone reusing this material elsewhere should:
-
-- Substitute the harness command for whatever your repo uses (Cypress, Playwright with a different bootstrap, etc.).
-- Adjust port numbers, base-branch names (`dev`), and any path conventions.
-- Re-author the `// @covers` glob convention (or drop it if you don't need scoped runs).
-
-The README's `babysit-prs` section calls out the specific points to edit.
-
 ## If you're looking at git history
 
-Earlier revisions of this file documented an LLM-driven Playwright-MCP runner with auto-seed fallbacks, OTP fetching from MongoDB, console/network failure-capture trios, and per-checkbox bug-fix retries. That whole apparatus was retired when the harness moved to deterministic specs. Don't reintroduce it.
+Earlier revisions of this file documented an LLM-driven Playwright-MCP runner with auto-seed fallbacks, OTP fetching from the test DB, console/network failure-capture trios, and per-checkbox bug-fix retries. That whole apparatus was retired when the harness moved to deterministic specs. Don't reintroduce it. The replacement patterns are documented in `skills/e2e-harness-patterns/SKILL.md`.
