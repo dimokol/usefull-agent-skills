@@ -45,9 +45,10 @@ The calling session reads its repo map from the project's `CLAUDE.md`. The map d
 3. **Clean stale locks:**
    ```bash
    for lock in /tmp/babysit-e2e-stack.lock /tmp/babysit-tests-*.lock; do
-     [ -d "$lock" ] && rmdir "$lock" 2>/dev/null
+     [ -d "$lock" ] && rm -rf "$lock" 2>/dev/null
    done
    ```
+   Use `rm -rf`, not `rmdir` — the lock dir is non-empty by design (the holder writes `owner-pid` inside), so `rmdir` silently no-ops and stale locks persist into the new session.
 
 4. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted. Use `run_in_background: true`. Send all dispatches in a single message.
 
@@ -60,6 +61,16 @@ The calling session reads its repo map from the project's `CLAUDE.md`. The map d
    - Only treat `READY` as truly ready when the diff was non-empty AND either (a) affected tests > 0 and exit 0, or (b) zero source/test files changed (docs/copy-only PR).
    - **Re-count Copilot threads independently.** Re-run the Step-2 GraphQL query (unresolved Copilot threads) from the parent and confirm `status.applied + status.declined ≥ count`. A mismatch means the subagent missed threads — re-dispatch with a note `"thread count mismatch (saw N, processed M) — filter bug or new threads landed mid-run"`. Past incident: PR #289 had one unresolved Copilot thread, the subagent's REST filter matched zero, agent reported READY with `applied: 0`, and the user caught it manually. The independent recount makes any future filter regression visible.
    - Reap leaked subprocesses owned by the dead agent: `ps -ef | grep -E 'jest|cross-env|node.*--watch' | grep -v 'Visual Studio\|Discord'` — kill PIDs whose start time is within the dispatch window AND parent isn't a user-owned watcher (started before the babysit dispatch). The `trap '... EXIT'` cleanup in subagent prompts does NOT fire when the runtime kills the subagent externally.
+   - **Release leaked e2e-stack lock.** Same root cause as the leaked-subprocess case — when the runtime reaps a subagent after it returns its JSON line, the in-prompt `trap 'rm -rf /tmp/babysit-e2e-stack.lock' EXIT` doesn't fire. The next FE agent in line would then block on the 4-hour lock-wait timeout for nothing. Past incident: an e2e-suite subagent returned READY, was reaped before its trap could clean up, left the lock owned by a dead PID — the next agent in the queue would have blocked indefinitely. Check via:
+     ```bash
+     if [ -d /tmp/babysit-e2e-stack.lock ]; then
+       PID=$(cat /tmp/babysit-e2e-stack.lock/owner-pid 2>/dev/null)
+       if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+         rm -rf /tmp/babysit-e2e-stack.lock
+       fi
+     fi
+     ```
+     The `kill -0 <pid>` only checks "is this PID alive" — it doesn't signal the process.
 
 7. **After all subagents return** (or on user request), prune leftover worktrees and locks:
    ```bash
@@ -67,7 +78,7 @@ The calling session reads its repo map from the project's `CLAUDE.md`. The map d
      git -C "$path" worktree prune
    done
    for lock in /tmp/babysit-e2e-stack.lock /tmp/babysit-tests-*.lock; do
-     [ -d "$lock" ] && rmdir "$lock" 2>/dev/null
+     [ -d "$lock" ] && rm -rf "$lock" 2>/dev/null
    done
    ```
 
@@ -253,6 +264,15 @@ b) **Review against:**
    - Project conventions from CLAUDE.md (translations, custom-component reuse, dark mode, backwards-compat, file/folder naming, language-aware navigation, etc.).
    - Generic correctness — null/undefined risk, race conditions, leaked promises, dead code, missing error handling at system boundaries.
    - Test parity — if the diff touches product behavior, are the relevant specs updated? Use the repo's `@covers` convention (FE) or co-located test files (BE) to check.
+   - **Cross-repo backwards-compat (`[CRITICAL]` if violated).** If the diff deletes or renames any GraphQL field/type, model field, enum value, REST route, or exported function, `git grep` each removed identifier against the base branches (`origin/{baseBranch}` for every OTHER repo in the Repo map, plus `origin/main` if different from `{baseBranch}`). Hits = real BC break — promote to `[CRITICAL]`. A "paired PR migrates the consumer" claim does NOT cover production state on the protected branch. The agent typically loads CLAUDE.md + diff + changed files but never greps cross-repo, so renames slip through as `[SUGGESTION]` when they are really BC violations. Past incident: a BE PR renamed 4 GraphQL fields on a slim calendar type and self-review classified it `[SUGGESTION]`; the paired FE's `main` branch still queried the old names verbatim — would have errored the production calendar on first deploy. Concrete check, per removed identifier `<id>`:
+     ```bash
+     for repo_path in <other repo paths from Repo map>; do
+       git -C "$repo_path" fetch origin {baseBranch} main 2>/dev/null
+       git -C "$repo_path" grep -nE "\\b<id>\\b" origin/{baseBranch} origin/main -- '<paths-likely-to-consume-this>' || true
+     done
+     ```
+     Any hit = `[CRITICAL]` BC violation, regardless of paired-PR claims.
+   - **Slim-shape consumer audit (`[WARNING]` minimum, `[CRITICAL]` if a safety/correctness check).** If the diff introduces a slim/projection type, replaces a "full" type with a slim one, or narrows a `select` / `projectionFromInfo`, the slim shape may silently drop fields the existing consumers render. For every field present in the OLD shape but absent in the new shape, grep all consumers (`git grep <fieldName>` across every repo in the Repo map) and verify they don't read it. Missing field → silent UI/feature regression. Past incident: an FE PR migrated to a slim calendar shape and the commit message claimed "fields the route card doesn't render"; consumer grep found 4 used fields silently dropped, including one that silently disabled a tax-compliance vehicle-mismatch safety warning. Promote a dropped safety-critical field (compliance checks, payment-status guards, permission gates) to `[CRITICAL]`.
 
 c) **Produce findings** with the `AI_REVIEW=1` taxonomy:
    - `[CRITICAL]` — data loss, security, regression risk, broken backwards-compat
