@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
 
 | Skill | Status | What it does |
 |---|---|---|
-| [`babysit-prs`](skills/babysit-prs/SKILL.md) | **active, portable** | End-to-end PR finalization. One subagent per PR, parallel. Copilot review + self-review fallback + CI gate + local e2e (where applicable). |
+| [`babysit-prs`](skills/babysit-prs/SKILL.md) | **active, portable** | End-to-end PR finalization. One subagent per PR, parallel. Always-on self-review **in parallel with** a configurable reviewer + CI gate + local e2e (only when the diff needs it). Optional: ask the reviewer in a chat tool, and auto-merge when production-ready. |
 | [`e2e-harness-patterns`](skills/e2e-harness-patterns/SKILL.md) | **active, reference** | Catalog of patterns for designing a local e2e harness — ephemeral stacks, dynamic ports, scope-based selection, session-bypass auth, lock-serialization, dual-speed iteration. Pairs with `babysit-prs`. |
 | [`verify-manual-tests`](skills/verify-manual-tests/SKILL.md) | ❌ **deprecated** | LLM-in-loop runner for prose checklists; superseded by deterministic e2e specs. |
 
@@ -61,12 +61,12 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
 
 End-to-end PR finalization for one or more open PRs. The calling session dispatches **one background subagent per PR** (parallel) and returns control immediately. Each subagent independently:
 
-1. Detects whether Copilot has reviewed (fast-fail if Copilot has clearly errored or never posted within ~5 min of PR open).
-2. If Copilot reviewed: reads each comment, judges validity per the repo's `CLAUDE.md`, fixes valid items, replies, resolves threads.
-3. If Copilot did not review: self-reviews the diff against the project's `CLAUDE.md`, posts findings as a top-level PR comment, implements `[CRITICAL]` + `[WARNING]` findings as new commits.
-4. Waits for CI green (`gh pr checks <pr> --watch`).
-5. For repos with local e2e: runs the suite inside an isolated git worktree (lock-serialized across PRs).
-6. Returns ONE JSON line: `{"pr": N, "status": "READY|BLOCKED", "applied": [...], "declined": N, "e2e": "...", "blockers": [...]}`.
+1. **Self-reviews** the diff against the project's `CLAUDE.md` (cross-repo BC checks, slim-shape audit, test parity), posts findings as a top-level PR comment, implements `[CRITICAL]` + `[WARNING]` as new commits — **always, in parallel** with the configured reviewer (not just a fallback).
+2. Waits for CI green (`gh pr checks <pr> --watch`).
+3. For repos with local e2e: runs the suite inside an isolated git worktree (lock-serialized), and **only when the diff has behavioral surface**.
+4. Picks up the configured reviewer's GitHub review + inline threads (`{reviewer}` login; one consistent GraphQL handle), merges them with the self-review, applies what's valid, replies + resolves threads.
+5. If `Auto-merge` is enabled: re-requests the reviewer's approval, then merges into the base once fully production-ready (gates green, reviewer approved, prerequisites merged). Otherwise stops at `READY`.
+6. Returns ONE JSON line: `{"pr": N, "status": "MERGED|READY|READY_HELD|BLOCKED", "applied": [...], "declined": N, "e2e": "...", "held_on": [...], "blockers": [...]}`.
 
 **Invocation:** `/babysit-prs <key>:<pr> [<key>:<pr> ...]` — e.g. `/babysit-prs api:412 admin:188 portal:99`. Keys come from your CLAUDE.md repo map.
 

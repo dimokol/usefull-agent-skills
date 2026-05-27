@@ -18,10 +18,11 @@ This document complements `SKILL.md` (which describes the procedure) with the as
 
 ## Soft preconditions (skill adapts when absent)
 
-- **Copilot PR reviewer.** If your project has GitHub Copilot configured as a PR reviewer (the bot user `copilot-pull-request-reviewer`), the skill consumes its findings in Step 2. If not — or when Copilot errors, returns a fluff-only review, or never posts — the skill falls back to self-review in Step 1.5: it reads your `CLAUDE.md`, reads the diff, and posts findings as a top-level PR comment.
+- **A configured code reviewer.** Set `Reviewer GitHub login` in your CLAUDE.md to whoever reviews PRs — GitHub Copilot (`copilot-pull-request-reviewer`), a custom bot, or a human. The skill collects that login's review + approval in Step 4. If the reviewer must be *pinged* (an agent that lives in a chat tool) rather than auto-triggering on PR open, set `Ask reviewer via chat`. Regardless, the skill **always self-reviews in parallel** (Step 1), so a missing / erroring / slow reviewer never blocks progress.
 - **Local end-to-end test suite.** If a repo's row in your CLAUDE.md has `Has local e2e suite? = true`, the skill runs `<e2eCmd>` from the worktree (Step 4). If no repo has e2e, Step 4 is skipped entirely. Recommended for projects whose e2e cost makes CI-runs prohibitive but local-runs feasible — see the companion skill `e2e-harness-patterns`.
 - **Pre-commit hooks (husky / lefthook / pre-commit).** If your project enforces lint/format/typecheck pre-commit, the skill trusts that anything pushed has already passed — and skips local re-runs in Step 3. If there's no pre-commit gate, the skill still works; CI catches the same errors a few seconds later.
-- **An explicit "self-review on Copilot failure" rule.** Some teams write this into their CLAUDE.md or agent memory. If your project has one, mention it in your CLAUDE.md and the skill will follow it. If not, the skill's built-in Step 1.5 fallback (read diff against CLAUDE.md, post findings) is enough.
+- **Extra self-review rules.** The skill always self-reviews (Step 1: read the diff against CLAUDE.md, post findings) — that's built in and runs in parallel with the reviewer, not just as a fallback. If your team has additional review rules, write them into your CLAUDE.md and the skill follows them on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
+- **Auto-merge.** Off by default — the skill stops at `READY` and you merge. Turn it on (in your CLAUDE.md `Reviewer` config) only once you trust the flow; then the skill merges each PR into its base after gates are green and the reviewer has approved. `--no-merge` disables it for one run.
 
 ---
 
@@ -73,8 +74,12 @@ Your project's `CLAUDE.md` would include:
 - Target branch: `main`.
 - Merge strategy: merge commit (preserves PR grouping in `git log`).
 
-### Self-review fallback
-When Copilot review fails (errored / fluff / timeout), review the diff against this CLAUDE.md before merging. Findings get posted as a top-level PR comment with the same [CRITICAL]/[WARNING]/[SUGGESTION] taxonomy Copilot uses; [CRITICAL] and [WARNING] findings get implemented as new commits.
+### Reviewer
+- Reviewer GitHub login: `copilot-pull-request-reviewer` (Copilot auto-reviews on PR open).
+- Ask reviewer via chat: none. Auto-merge: off (babysit reports READY; you merge).
+
+### Self-review (always)
+babysit always self-reviews the diff against this CLAUDE.md in parallel with the reviewer and posts findings (same [CRITICAL]/[WARNING]/[SUGGESTION] taxonomy); [CRITICAL]/[WARNING] get implemented as new commits, [SUGGESTION] folded into the PR unless it's a big expansion. Never merge blind on a missing/erroring reviewer.
 ```
 
 You'd then invoke the skill like:
@@ -96,7 +101,7 @@ Before you invoke `/babysit-prs` for the first time in a new project:
 - [ ] You've installed `git` ≥ 2.5 (check: `git --version`). Worktrees enabled by default.
 - [ ] Each repo has CI configured such that `gh pr checks <pr> --watch` returns a meaningful pass/fail.
 - [ ] If any repo has local e2e: the harness command runs cleanly on a fresh PR branch from a fresh worktree (with `node_modules` symlinked, no `npm install`).
-- [ ] Optional: GitHub Copilot is enabled as a PR reviewer on each repo. (Recommended; skill works without it via the self-review fallback.)
+- [ ] Set `Reviewer GitHub login` (e.g. `copilot-pull-request-reviewer`) in your CLAUDE.md. Optional: `Ask reviewer via chat` if the reviewer must be pinged, and `Auto-merge: on` if you want babysit to merge once green + approved. The skill always self-reviews regardless.
 - [ ] You've added a `babysit-prs Configuration` section to your project's `CLAUDE.md` per the template above.
 - [ ] You've run `df -g /` and have ≥10 GB free.
 
@@ -109,7 +114,7 @@ If any of the above isn't true and the skill bails out, that's an early-warning.
 For clarity, things that are explicitly out of scope:
 
 - **It does not write your PR.** Open the PR yourself (or let your other agents do it); the skill picks up an *existing* open PR.
-- **It does not approve or merge.** It takes a PR to "merge-ready" — applies fixes, resolves Copilot threads, runs gates. The actual approve + merge button is yours.
+- **It does not approve PRs, and merges only when you opt in.** It always takes a PR to "merge-ready" — applies fixes, resolves reviewer threads, runs gates. Approval is the reviewer's; merge is yours unless you set `Auto-merge: on` (then babysit merges into the base once gates are green and the reviewer has approved).
 - **It does not handle release PRs differently.** A `dev → main` release PR babysits the same as any feature PR. If your project requires manual coordination on releases, do that yourself.
 - **It does not maintain its own state across sessions.** Marker files under `/tmp/babysit-*` enable in-session resume after a crash, but they're ephemeral. A reboot wipes them; the skill re-derives state from GitHub on next invoke.
 - **It does not handle non-GitHub review tools.** Reviewable, Phabricator, Gerrit, etc. — not supported.

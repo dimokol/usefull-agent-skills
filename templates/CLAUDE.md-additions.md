@@ -40,9 +40,15 @@ For each repo, describe what `gh pr checks <pr> --watch` will be waiting on:
 - **PR title format:** <optional convention, e.g. `[FEAT-123] short summary`>.
 - **Merge strategy:** <merge commit / squash / rebase> — be explicit; `babysit-prs` doesn't merge for you but the convention affects how Copilot threads/links carry forward.
 
-### Self-review fallback
+### Reviewer
 
-When Copilot review fails (errored / fluff-only / timeout), the skill self-reviews the diff against this CLAUDE.md and posts findings as a top-level PR comment with the `[CRITICAL] / [WARNING] / [SUGGESTION]` taxonomy. `[CRITICAL]` and `[WARNING]` findings are implemented as new commits.
+- **Reviewer GitHub login:** `<login>` — whose PR review + approval babysit collects (e.g. `copilot-pull-request-reviewer` for GitHub Copilot, or a custom reviewer bot/human login). Defaults to `copilot-pull-request-reviewer` if unset.
+- **Ask reviewer via chat:** `<none | tool + channel>` — only if the reviewer must be *pinged* to review (e.g. an agent that lives in Slack/Discord/Teams) rather than auto-triggering on PR open. When set, babysit sends ONE message per batch asking the reviewer to review every PR on GitHub and approve there.
+- **Auto-merge:** `off | on` (default **off**) — when on, babysit merges each PR into its base once fully production-ready (gates green, reviewer approved, no unresolved `[CRITICAL]`, prerequisites merged). When off, babysit stops at `READY` for a human to merge. `--no-merge` forces off per run.
+
+### Self-review (always)
+
+babysit always self-reviews the diff against this CLAUDE.md **in parallel** with the reviewer and posts findings as a top-level PR comment with the `[CRITICAL] / [WARNING] / [SUGGESTION]` taxonomy. `[CRITICAL]`/`[WARNING]` are implemented as new commits; `[SUGGESTION]` is folded into the PR by default (deferred only for big expansions or changes that could break the fix). Self-review is the primary signal when the reviewer is slow or never arrives — never merge blind.
 
 If your team has additional self-review rules, add them here.
 ```
@@ -87,9 +93,15 @@ A fictional 3-repo SaaS monorepo, for shape reference:
 - **PR title format:** none enforced.
 - **Merge strategy:** "Create a merge commit" — preserves PR grouping in `git log` and `git blame`. Squash is acceptable for tiny single-commit cleanups; never use rebase merge.
 
-### Self-review fallback
+### Reviewer
 
-Per project rule: when Copilot review fails, review the diff against this CLAUDE.md and post findings before merging. `[CRITICAL]` and `[WARNING]` items get implemented as new commits; `[SUGGESTION]` items are judged case-by-case.
+- **Reviewer GitHub login:** `copilot-pull-request-reviewer` (GitHub Copilot auto-reviews on PR open).
+- **Ask reviewer via chat:** none — Copilot auto-triggers, so babysit just polls for it.
+- **Auto-merge:** off — babysit reports `READY`; a human approves + merges.
+
+### Self-review (always)
+
+babysit always self-reviews the diff against this CLAUDE.md in parallel with Copilot and posts findings before merge. `[CRITICAL]`/`[WARNING]` get implemented as new commits; `[SUGGESTION]` is folded into the PR unless it's a big expansion. Never merge blind on a missing/erroring reviewer.
 ```
 
 ---
@@ -100,4 +112,6 @@ Per project rule: when Copilot review fails, review the diff against this CLAUDE
 - `Base branch` doesn't have to be `main`. Many teams use `dev` or `develop`; the skill reads whatever you write.
 - `Has local e2e suite?` flips Step 4 of the skill on/off per repo. If no repo has e2e, the whole step is skipped.
 - The `E2E setup` section is read by the skill only loosely (it primarily uses `E2E command` from the map). Most of the content is there for *humans* reviewing what the skill will do — keep it accurate so a teammate or future-you knows the contract.
-- The `Self-review fallback` section is read when Copilot's review is unavailable. The skill follows whatever rules you write here on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
+- The `Reviewer` section drives who babysit collects reviews from, whether it pings them in chat, and whether it auto-merges. Leave `Ask reviewer via chat: none` + `Auto-merge: off` for the simplest setup (Copilot auto-reviews; you merge).
+- `Self-review (always)` runs in parallel on every PR — it is no longer just a fallback. The skill follows any extra rules you write here on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
+- `Auto-merge: on` is powerful — babysit will merge into the base branch once gates are green and the reviewer has approved. Keep it `off` until you trust the flow; `--no-merge` disables it for a single run.
