@@ -1,6 +1,6 @@
 ---
 name: babysit-prs
-description: End-to-end PR finalization for one or more open GitHub PRs. Spawns one background subagent per PR; each subagent self-reviews the diff against the project's CLAUDE.md in parallel with the configured code reviewer, merges both review sources and applies what is valid, waits on CI for the quality gate, and — for repos that declare a local e2e suite — runs it (only when the diff needs it) inside an isolated git worktree serialized by a filesystem lock. Optionally (when configured) it asks the reviewer to review in a chat tool, re-requests approval after fixes, and merges each PR into its own base branch once it is fully production-ready. Returns control to the calling session immediately. Use when the user lists 1+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
+description: End-to-end PR finalization for one or more open GitHub PRs. Spawns one background subagent per PR; each subagent applies the configured code reviewer's findings (and, with --double-review, also self-reviews the diff against the project's CLAUDE.md in parallel and merges both), waits on CI for the quality gate, and — for repos that declare a local e2e suite — runs it (only when the diff needs it) inside an isolated git worktree serialized by a filesystem lock. Optionally (when configured) it asks the reviewer to review in a chat tool, re-requests approval after fixes, and merges each PR into its own base branch once it is fully production-ready. Returns control to the calling session immediately. Use when the user lists 1+ PRs and asks to "babysit", "finalize", "ready for merge", "handle reviews and tests", "auto-handle PRs", or similar end-to-end PR closeout phrasing.
 ---
 
 # babysit-prs
@@ -9,7 +9,7 @@ Take a list of open PRs from ready-for-review toward merge-ready — and, if you
 
 ## Invocation
 
-`/babysit-prs <pr-spec> [<pr-spec> ...] [--no-merge]`
+`/babysit-prs <pr-spec> [<pr-spec> ...] [--no-merge] [--double-review]`
 
 Each `<pr-spec>` is either:
 - `<repo-key>:<pr-number>` — e.g. `be:188`
@@ -18,6 +18,7 @@ Each `<pr-spec>` is either:
 
 **Flags:**
 - `--no-merge` — take every PR to fully-ready but STOP before merging; report `READY` and hand back. Only meaningful when the project config enables auto-merge (otherwise babysit never merges and this is the default behavior).
+- `--double-review` — also run a dedicated self-review agent **in parallel with the reviewer** on every PR and merge both reviews. Default (no flag) = **the configured reviewer is the sole reviewer**; the self-review then runs ONLY as a fallback when the reviewer can't be reached or never reviews within the time caps, so a PR held for manual merge still got the mechanical backwards-compat / slim-shape checks.
 
 ## Configuration (provided by the project's CLAUDE.md)
 
@@ -62,7 +63,7 @@ The calling session reads its config from the project's `CLAUDE.md`. **Adopters:
 4. **Ask the reviewer — ONE message, only if `Ask reviewer via chat` is configured.** Post a single message via the configured chat tool listing every PR (repo + number + URL + one-line what-it-is) and instruct the reviewer to review each on its GitHub PR with inline findings and **approve on GitHub** when satisfied. Capture the chat thread reference + send time; pass both to every subagent as `{chatThread}` and `{askedAt}` (any reviewer review/approval older than `{askedAt}` is stale). If the chat tool is unavailable, do NOT abort: fall back to polling-only (subagents still run all steps) and note `"reviewer-chat unreachable"` in each PR's blockers — those PRs then can't auto-merge (no approval signal you triggered) and end `READY`.
    - **Skip this step entirely when `Ask reviewer via chat` is unset** — the reviewer auto-triggers (Copilot model); subagents just poll for it in Step 4.
 
-5. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted (including `{reviewer}`, `{chatThread}`, `{askedAt}`, `{autoMerge}`, `{noMerge}`). Use `run_in_background: true`. Send all dispatches in a single message.
+5. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted (including `{reviewer}`, `{chatThread}`, `{askedAt}`, `{autoMerge}`, `{noMerge}`, `{doubleReview}`). Use `run_in_background: true`. Send all dispatches in a single message.
 
 6. **Hand control back to the user.** One sentence: "Dispatched N agents in worktrees under `<path>--babysit-pr-<pr>`. Status lands in `/tmp/babysit-<pr>-status.json`. Continue with other work — I won't poll."
 
@@ -106,12 +107,12 @@ The calling session never modifies the user's main checkouts — every subagent 
 
 ## Per-PR subagent task (passed verbatim with placeholders substituted)
 
-> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{baseBranch}`, `{hasE2E}` (`true`/`false`), `{e2eCmd}`, `{branch}`, `{reviewer}` (reviewer GitHub login), `{chatThread}` (reviewer chat thread, or empty), `{askedAt}` (epoch seconds, or 0), `{autoMerge}` (`true`/`false`), `{noMerge}` (`true`/`false`).
+> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{baseBranch}`, `{hasE2E}` (`true`/`false`), `{e2eCmd}`, `{branch}`, `{reviewer}` (reviewer GitHub login), `{chatThread}` (reviewer chat thread, or empty), `{askedAt}` (epoch seconds, or 0), `{autoMerge}` (`true`/`false`), `{noMerge}` (`true`/`false`), `{doubleReview}` (`true`/`false`).
 
 You are a PR babysitter for ONE pull request. Take it from "ready-for-review" to "merge-ready" (and to **merged** when auto-merge is on and `{noMerge}` is false), then return ONE JSON status line.
 
 **PR:** {pr} on {ghRepo}, branch `{branch}`, working tree at `{path}`.
-**Reviewer:** GitHub login `{reviewer}`. You self-review in parallel (Step 1) and merge the reviewer's findings with yours (Step 4). Any reviewer review/approval older than `{askedAt}` is stale; ignore it. If the reviewer replies in a chat tool (`{chatThread}` set), read the **thread** (e.g. Slack `conversations_replies` on `{chatThread}`) — channel-history endpoints typically return ONLY top-level messages, so they show the reviewer's last *root* post (an old date) and make them look inactive while they reply in-thread. Authoritative review/approval is GitHub (`reviewDecision`), not chat.
+**Reviewer:** GitHub login `{reviewer}`. When `{doubleReview}` is `true` you also self-review in parallel (Step 1) and merge the reviewer's findings with yours (Step 4); when it is `false` (default) the configured reviewer is the sole reviewer and Step 1 runs only as a fallback if the reviewer can't be reached. Any reviewer review/approval older than `{askedAt}` is stale; ignore it. If the reviewer replies in a chat tool (`{chatThread}` set), read the **thread** (e.g. Slack `conversations_replies` on `{chatThread}`) — channel-history endpoints typically return ONLY top-level messages, so they show the reviewer's last *root* post (an old date) and make them look inactive while they reply in-thread. Authoritative review/approval is GitHub (`reviewDecision`), not chat.
 **Gate verification:** GitHub CI (`gh pr checks {pr} --repo {ghRepo} --watch`). Do NOT run lint/build/typecheck/unit-tests locally — CI already does it on every push.
 **Local e2e suite:** {hasE2E} ({e2eCmd} when true). Runs locally because there's no CI for it — and only when the diff needs it (Step 3).
 
@@ -180,9 +181,13 @@ echo "PR-changed files:"; cat /tmp/babysit-{pr}-diff.txt
 
 **Why this exists:** affected-only test runners (`--changedSince` / `--only-changed`) compare against `origin/{baseBranch}`. If the worktree's ref is stale, the diff is empty and "0 affected tests" is reported as gate-passed — a false-green. The fetch + diff dump fixes this and gives subsequent steps a ground-truth file list. If the diff is empty, write blocker `"branch has no commits ahead of origin/{baseBranch} — already merged or wrong branch"` and exit.
 
-## Step 1 — self-review (always, primary, in parallel with the reviewer)
+## Step 1 — self-review (only with `--double-review`, or as reviewer-unreachable fallback)
 
-**Why self-review runs in parallel with the reviewer:** the configured reviewer ({reviewer}) is the human-equivalent signal, but it's asynchronous and can err / never arrive. Self-review is fast, deterministic, and catches design / safety / parity / convention drift CI can't. Run it NOW so the PR is never blocked on one reviewer; Step 4 merges the reviewer's findings with these. Self-review is never skipped, even when the reviewer is fast.
+**When to run this step:**
+- **`{doubleReview}` is `true`** → run it NOW, in parallel with the reviewer's review, so the PR is never blocked on one reviewer; Step 4 merges the reviewer's findings with these.
+- **`{doubleReview}` is `false` (default)** → **SKIP this step here**; the configured reviewer is the sole reviewer. Run it later ONLY as a fallback if the reviewer turns out unreachable or never reviews within the Step 4/5 caps (Step 4b redirects here), so a PR held for manual merge still gets the mechanical checks below.
+
+**Why these checks matter whenever they run:** self-review is fast, deterministic, and catches design / safety / parity / convention drift CI can't — especially the cross-repo backwards-compat grep and the slim-shape consumer audit, which a prose review routinely misses.
 
 If `/tmp/babysit-{pr}-self-reviewed` exists, skip this step.
 
@@ -294,7 +299,7 @@ touch /tmp/babysit-{pr}-tested
 
 ## Step 4 — reviewer pickup
 
-By now self-review (Step 1), CI (Step 2), and e2e (Step 3) have run, so the reviewer ({reviewer}) has had several minutes to review (whether auto-triggered or asked in Step 4 of the parent). Collect the review, merge with your self-review, apply what's valid.
+By now CI (Step 2), e2e (Step 3), and — if `{doubleReview}` was set — self-review (Step 1) have run, so the reviewer ({reviewer}) has had several minutes to review (whether auto-triggered or asked in Step 4 of the parent). Collect the review, merge with your self-review, apply what's valid.
 
 If `/tmp/babysit-{pr}-review-done` exists, skip this step.
 
@@ -320,9 +325,9 @@ echo "reviewer: $REV_COUNT reviews, $THREAD_COUNT unresolved threads"
 
 **Why GraphQL, not REST:** GraphQL returns each thread `id` (`PRRT_*`) needed by `resolveReviewThread`, and filters on one consistent login in a single round-trip. Some reviewers (notably GitHub Copilot) surface under three different REST logins (`Copilot`, `copilot-pull-request-reviewer`, `copilot-pull-request-reviewer[bot]`) depending on API surface — a REST filter that matched only one once reported `applied: 0` while a real comment was unhandled. One known login via GraphQL avoids that class of bug.
 
-b) **If no review yet (`$REV_COUNT == 0` AND `$THREAD_COUNT == 0`):**
+b) **If no review yet (`$REV_COUNT == 0` AND `$THREAD_COUNT == 0`):** first, **if you have not already self-reviewed (i.e. `{doubleReview}` was `false`), run the Step 1 self-review NOW as the fallback** — post findings, apply `[CRITICAL]`/`[WARNING]` fixes, push — so a held PR still got the mechanical checks. Then:
    - If `{chatThread}` is set (you asked the reviewer): poll the query every 60s for up to ~15 min; at ~5 min still nothing, post ONE reply in `{chatThread}` bumping the PR; at the cap, blocker `"awaiting reviewer review"`, touch the marker, continue (the PR will end `READY`, never merged).
-   - If `{chatThread}` is empty (auto-trigger model): the reviewer may have errored/never run. Treat self-review as the sole signal, touch the marker, and continue.
+   - If `{chatThread}` is empty (auto-trigger model): the reviewer may have errored/never run. Treat the fallback self-review as the sole signal, touch the marker, and continue.
 
 c) **If a reviewer review body exists, treat it like your self-review** — apply `[CRITICAL]`/`[WARNING]` as commits, fold in `[SUGGESTION]` per Step 1(f), reply with applied/declined. The reviewer can be wrong on context-dependent items — judge each against CLAUDE.md.
 
@@ -366,7 +371,7 @@ LAST_COMMIT_TS=$(git log -1 --format=%cI)
 
 **Skip if `{autoMerge}` is false or `{noMerge}` is true** — report `READY`.
 
-Confirm "fully production-ready" — ALL must hold: self-review posted + every `[CRITICAL]`/`[WARNING]` applied or justified + no unresolved `[CRITICAL]`; CI green; e2e green / skipped-verified / skipped-no-behavioral-change; every reviewer thread replied + resolved; reviewer `APPROVED` newer than the last commit (`reviewDecision == APPROVED`); `blockers[]` empty. If any fails → don't merge; report `READY` (held) or `BLOCKED`.
+Confirm "fully production-ready" — ALL must hold: **if a self-review was performed** (`--double-review` or the reviewer-unreachable fallback) it's posted + every `[CRITICAL]`/`[WARNING]` applied or justified + no unresolved `[CRITICAL]`; CI green; e2e green / skipped-verified / skipped-no-behavioral-change; every reviewer thread replied + resolved; reviewer `APPROVED` newer than the last commit (`reviewDecision == APPROVED`); `blockers[]` empty. If any fails → don't merge; report `READY` (held) or `BLOCKED`.
 
 **Prerequisites:** read the PR body for declared prerequisites (`Paired with <repo>: PR #N`, `depends on #N`) — possibly in another repo. A `Paired with` PR is a prerequisite only when *this* PR depends on it (judge direction). For each true prerequisite, check `gh pr view <N> --repo <prereqRepo> --json state`:
 - **All `MERGED`** → safe to merge.
@@ -405,7 +410,7 @@ If remove fails (uncommitted experimental changes), add blocker `"worktree at <p
 ```
 
 - **`MERGED`** — auto-merge on, all gates held, reviewer approved, prerequisites merged, `gh pr merge` succeeded into the base.
-- **`READY`** — gates green + (reviewer approved or auto-merge off / `--no-merge`); handed back for a human to merge. Also used when self-review is clean but the reviewer never reviewed/approved (`blockers` says why).
+- **`READY`** — gates green + (reviewer approved or auto-merge off / `--no-merge`); handed back for a human to merge. Also used when the reviewer never reviewed/approved — with the fallback self-review run when `--double-review` was off (`blockers` says why).
 - **`READY_HELD`** — fully approved + green, NOT merged only because a declared prerequisite (`held_on`) hasn't merged yet.
 - **`BLOCKED`** — an unresolved `[CRITICAL]`, a red gate, a merge conflict, or any `blockers[]` item. Never merged.
 
