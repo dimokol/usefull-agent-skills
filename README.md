@@ -57,6 +57,14 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
 | [`e2e-harness-patterns`](skills/e2e-harness-patterns/SKILL.md) | **active, reference** | Catalog of patterns for designing a local e2e harness — ephemeral stacks, dynamic ports, scope-based selection, session-bypass auth, lock-serialization, dual-speed iteration. Pairs with `babysit-prs`. |
 | [`verify-manual-tests`](skills/verify-manual-tests/SKILL.md) | ❌ **deprecated** | LLM-in-loop runner for prose checklists; superseded by deterministic e2e specs. |
 
+## Hooks
+
+Not skills, but harness-level guard rails that pair with them.
+
+| Hook | Status | What it does |
+|---|---|---|
+| [`no-auto-merge`](hooks/no-auto-merge/README.md) | **active, portable** | PreToolUse guard that physically blocks an agent from merging PRs or pushing to `main`/`master`. The agent runs reviews and gates, then stops at "ready, awaiting your explicit merge approval"; per-merge override via `ALLOW_MERGE=1` only after you approve. A hard rail that holds even when prompt-level rules drift in long sessions. |
+
 ### `babysit-prs` highlights
 
 End-to-end PR finalization for one or more open PRs. The calling session dispatches **one background subagent per PR** (parallel) and returns control immediately. Each subagent independently:
@@ -65,7 +73,7 @@ End-to-end PR finalization for one or more open PRs. The calling session dispatc
 2. Waits for CI green (`gh pr checks <pr> --watch`).
 3. For repos with local e2e: runs the suite inside an isolated git worktree (lock-serialized), and **only when the diff has behavioral surface**.
 4. Picks up the configured reviewer's GitHub review + inline threads (`{reviewer}` login; one consistent GraphQL handle), merges them with the self-review, applies what's valid, replies + resolves threads.
-5. If `Auto-merge` is enabled: re-requests the reviewer's approval, then merges into the base once fully production-ready (gates green, reviewer approved, prerequisites merged). Otherwise stops at `READY`.
+5. Stops at `READY` once fully production-ready (gates green, reviewer approved, threads resolved) — the operator merges. Only if `Auto-merge` is explicitly enabled (off by default, and we recommend keeping it off — pair with the [`no-auto-merge` hook](hooks/no-auto-merge/README.md) for hard enforcement) does it merge into the base itself.
 6. Returns ONE JSON line: `{"pr": N, "status": "MERGED|READY|READY_HELD|BLOCKED", "applied": [...], "declined": N, "e2e": "...", "held_on": [...], "blockers": [...]}`.
 
 **Invocation:** `/babysit-prs <key>:<pr> [<key>:<pr> ...]` — e.g. `/babysit-prs api:412 admin:188 portal:99`. Keys come from your CLAUDE.md repo map.

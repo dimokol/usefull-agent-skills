@@ -44,7 +44,7 @@ For each repo, describe what `gh pr checks <pr> --watch` will be waiting on:
 
 - **Reviewer GitHub login:** `<login>` — whose PR review + approval babysit collects (e.g. `copilot-pull-request-reviewer` for GitHub Copilot, or a custom reviewer bot/human login). Defaults to `copilot-pull-request-reviewer` if unset.
 - **Ask reviewer via chat:** `<none | tool + channel>` — only if the reviewer must be *pinged* to review (e.g. an agent that lives in Slack/Discord/Teams) rather than auto-triggering on PR open. When set, babysit sends ONE message per batch asking the reviewer to review every PR on GitHub and approve there.
-- **Auto-merge:** `off | on` (default **off**) — when on, babysit merges each PR into its base once fully production-ready (gates green, reviewer approved, no unresolved `[CRITICAL]`, prerequisites merged). When off, babysit stops at `READY` for a human to merge. `--no-merge` forces off per run.
+- **Auto-merge:** `off | on` (default **off**, recommended **off**) — when on, babysit merges each PR into its base once fully production-ready (gates green, reviewer approved, no unresolved `[CRITICAL]`, prerequisites merged). When off, babysit stops at `READY` for a human to merge. `--no-merge` forces off per run. For hard enforcement of off, install the [`no-auto-merge` hook](../hooks/no-auto-merge/README.md) — it blocks merge commands at the harness level regardless of prompts.
 
 ### Self-review (always)
 
@@ -114,4 +114,4 @@ babysit always self-reviews the diff against this CLAUDE.md in parallel with Cop
 - The `E2E setup` section is read by the skill only loosely (it primarily uses `E2E command` from the map). Most of the content is there for *humans* reviewing what the skill will do — keep it accurate so a teammate or future-you knows the contract.
 - The `Reviewer` section drives who babysit collects reviews from, whether it pings them in chat, and whether it auto-merges. Leave `Ask reviewer via chat: none` + `Auto-merge: off` for the simplest setup (Copilot auto-reviews; you merge).
 - `Self-review (always)` runs in parallel on every PR — it is no longer just a fallback. The skill follows any extra rules you write here on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
-- `Auto-merge: on` is powerful — babysit will merge into the base branch once gates are green and the reviewer has approved. Keep it `off` until you trust the flow; `--no-merge` disables it for a single run.
+- `Auto-merge: on` is powerful — babysit will merge into the base branch once gates are green and the reviewer has approved. Our recommendation after running this in production: keep it `off` permanently and trigger every merge yourself — agents finishing a PR and the operator deciding when it ships are different jobs. `--no-merge` disables it for a single run; the [`no-auto-merge` hook](../hooks/no-auto-merge/README.md) enforces `off` at the harness level.
