@@ -115,3 +115,52 @@ babysit always self-reviews the diff against this CLAUDE.md in parallel with Cop
 - The `Reviewer` section drives who babysit collects reviews from, whether it pings them in chat, and whether it auto-merges. Leave `Ask reviewer via chat: none` + `Auto-merge: off` for the simplest setup (Copilot auto-reviews; you merge).
 - `Self-review (always)` runs in parallel on every PR — it is no longer just a fallback. The skill follows any extra rules you write here on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
 - `Auto-merge: on` is powerful — babysit will merge into the base branch once gates are green and the reviewer has approved. Our recommendation after running this in production: keep it `off` permanently and trigger every merge yourself — agents finishing a PR and the operator deciding when it ships are different jobs. `--no-merge` disables it for a single run; the [`no-auto-merge` hook](../hooks/no-auto-merge/README.md) enforces `off` at the harness level.
+
+---
+
+# CLAUDE.md additions — `create-pr` configuration
+
+Paste the block below into your project's `CLAUDE.md` and fill in the placeholders. The `create-pr` skill reads this section to know your PR body shape, your test-verification marker convention, how you link PRs to your task board, and your deploy notes.
+
+## Template (paste into your CLAUDE.md and edit)
+
+```markdown
+## create-pr Configuration
+
+### PR body template
+
+<Paste your team's PR body template here, using your own section names and order. A common shape:>
+
+- `## Task` — <omit if you don't use a task board>
+- `## Summary` — <1-3 bullets: what changed>
+- `## Why` — <1 sentence: driver or ticket reference>
+- `## Tests` — <your test-results convention, per repo/stack>
+- `## Standards compliance` — <omit unless your project has a compliance gate PRs must self-report against>
+- `## Paired with <repo>` — <omit if standalone>
+- `## Manual verification` — <cap at 1-3 checkboxes, omit if nothing needs manual checking>
+- `## Design / Plan` — <omit if no design doc>
+
+### Test-verification marker
+
+- **Convention:** `<!-- babysit-verified: {"e2e":"X/Y","date":"YYYY-MM-DD","sha":"<7-char HEAD SHA>"} -->` (the default, shared with `babysit-prs` — reuse it as-is unless you have a reason not to).
+- **Where it goes:** the line immediately after your Tests section's test-results bullet.
+- **When to add it:** only when the local suite ran and passed in the same session that created/amended the PR. `sha` must match current HEAD or a consumer should treat it as stale.
+
+### Task-link line format
+
+- **Task board:** `{task-board}` — <name your board: Jira, Linear, an internal portal, none>
+- **Line format in `## Task`:** `<e.g. "Task: <url>" or "Linked-Task: PROJ-123">`
+- **Link-back call:** `<how a PR gets attached to the task on your board's side, if it supports it — API call, MCP tool, or "manual, paste the PR link in the task">`
+
+### Deploy notes
+
+- **Target trunk (`{trunk}`):** `<branch this PR merges into, e.g. main / dev / develop>`
+- **Cross-repo pairing:** `<same-branch-name convention across repos, or "N/A — single repo">`
+- **Merge policy:** `<who/what triggers the actual merge — references your babysit-prs Auto-merge setting if you use that skill, or "manual only">`
+```
+
+## Notes for adopters
+
+- The **test-verification marker** is the one piece of this config designed to be copied verbatim rather than customized — its whole value is that `babysit-prs` (or any similar downstream flow) recognizes it without per-project translation. Change the format only if you're not using `babysit-prs` and have your own consumer for it.
+- `{task-board}` and its link-line format are optional. If your project has no task board, delete the `## Task` section from your PR body template and skip that part of the config entirely — the skill never assumes a task board exists.
+- `Deploy notes` is where `create-pr` and `babysit-prs` overlap slightly by design: `create-pr` states the convention when *opening* the PR (trunk, pairing), `babysit-prs` enforces the actual merge policy when *closing* it. Keep both configs pointing at the same trunk and pairing convention so they don't drift apart.
