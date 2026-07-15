@@ -10,3 +10,5 @@ Reusable `SKILL.md` workflows. Install with the repo's `install.sh`; each skill'
 | [verify-before-building](verify-before-building/) | Cut a feature branch the safe way: fetch and check the trunk first so you never rebuild what the mainline already shipped. | 🟢 |
 | [worktree-hygiene](worktree-hygiene/) | Session-start audit: disk free, Docker cache size, stale worktrees, branch divergence. Catches what silently eats a laptop. | 🟢 |
 | [setup-audit](setup-audit/) | Periodic check your agent setup has not drifted, with weekly/deep modes and drift tripwires; catch ecosystem changes worth adopting. | 🟢 |
+| [task-sync](task-sync/) | Reconcile your task board so each task shows its real status, never inflated. Thin: value depends on having a task board. | 🟡 |
+| [worktree-qa-queue](worktree-qa-queue/) | Parallel dev in worktrees + promote one ready branch at a time into the main checkout for manual QA before merge. Maximizes speed and quality. | 🟡 |
