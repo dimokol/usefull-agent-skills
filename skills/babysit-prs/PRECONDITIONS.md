@@ -23,6 +23,8 @@ This document complements `SKILL.md` (which describes the procedure) with the as
 - **Pre-commit hooks (husky / lefthook / pre-commit).** If your project enforces lint/format/typecheck pre-commit, the skill trusts that anything pushed has already passed — and skips local re-runs in Step 3. If there's no pre-commit gate, the skill still works; CI catches the same errors a few seconds later.
 - **Extra self-review rules.** The skill always self-reviews (Step 1: read the diff against CLAUDE.md, post findings) — that's built in and runs in parallel with the reviewer, not just as a fallback. If your team has additional review rules, write them into your CLAUDE.md and the skill follows them on top of its built-in [CRITICAL]/[WARNING]/[SUGGESTION] flow.
 - **Auto-merge.** Off by default — the skill stops at `READY` and you merge. Turn it on (in your CLAUDE.md `Reviewer` config) only once you trust the flow; then the skill merges each PR into its base after gates are green and the reviewer has approved. `--no-merge` disables it for one run.
+- **A task board.** If your project links PRs to tasks in the PR body and you set `{task-board}` in your CLAUDE.md, the skill flips a merged PR's linked task to done in Step 6. Unset by default — the skill never assumes a task board exists and simply skips that step.
+- **An "already verified" e2e marker convention.** If a repo has `Has local e2e suite? = true` and another session (or the `create-pr` skill) already ran the harness against the exact commit being babysat, it can leave a `<!-- babysit-verified: {...} --> ` comment with the run result and HEAD sha in the PR body. The skill honors a SHA-matched marker and skips re-booting the harness; a stale (sha-mismatched) marker is ignored and the harness runs normally. Nothing to configure — this is a body-comment convention, not a CLAUDE.md setting.
 
 ---
 
@@ -34,6 +36,7 @@ Copy `templates/CLAUDE.md-additions.md` from this repo into your project's `CLAU
 - **A quality-gates note** — which CI handles what (lint? typecheck? build? unit tests?). The skill never re-runs these locally; it waits for CI to report.
 - **An e2e setup note** (only if any repo has e2e) — harness command, stack ports/dynamic-port behavior, seed-script path, affected-only policy.
 - **Branch + PR conventions** — base branch name, PR title format if any, merge strategy.
+- **Task board (optional)** — only if you want merged PRs to flip a linked task to done; otherwise omit it and the skill skips that step.
 
 Without that section in your CLAUDE.md, the calling session has nothing to read; it will refuse to start (or worse, guess).
 

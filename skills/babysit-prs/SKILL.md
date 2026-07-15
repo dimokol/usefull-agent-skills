@@ -35,8 +35,12 @@ The calling session reads its config from the project's `CLAUDE.md`. **Adopters:
 ### Reviewer (configurable)
 
 - **`Reviewer GitHub login`** — the account whose PR review + approval babysit collects (e.g. `copilot-pull-request-reviewer` for GitHub Copilot, or a custom reviewer bot/human login). Babysit filters reviews/threads by this login. If unset, default to `copilot-pull-request-reviewer`.
-- **`Ask reviewer via chat`** (optional) — if the reviewer must be *pinged* to review (e.g. an agent that lives in Slack/Discord/Teams rather than auto-triggering on PR open), configure the chat tool + channel/thread here. When set, the parent sends ONE message per batch asking the reviewer to review every PR on GitHub and approve there. When unset, babysit assumes the reviewer auto-reviews on PR open (the Copilot model) and just polls for it.
+- **`Ask reviewer via chat`** (optional) — if the reviewer must be *pinged* to review (e.g. an agent that lives in a team messaging app rather than auto-triggering on PR open), configure the chat tool + channel/thread here. When set, the parent sends ONE message per batch asking the reviewer to review every PR on GitHub and approve there. When unset, babysit assumes the reviewer auto-reviews on PR open (the Copilot model) and just polls for it.
 - **`Auto-merge`** (optional, default **off**, recommended **off**) — when **on**, babysit merges each PR into its own base branch once it is fully production-ready (gates green, reviewer approved, no unresolved `[CRITICAL]`, prerequisites merged). When **off**, babysit stops at `READY` and hands back for a human to merge. `--no-merge` forces off for one run. The safest pattern is human-triggered merges only: the agent takes every PR to fully-ready and reports, the operator pulls the trigger per merge. Prompt-level rules can drift in long sessions, so for hard enforcement pair `off` with the repo's [`no-auto-merge` PreToolUse hook](../../hooks/no-auto-merge/README.md), which blocks merge commands at the harness level regardless of what any skill or prompt says. Branch promotions (e.g. `dev`→`main`) are never babysit's job in either mode — each is a separate, deliberate, operator-instructed step.
+
+### Task board (optional)
+
+- **`{task-board}`** — if your setup has a task board (Jira, Linear, an internal portal, whatever tracks work items) and PRs link to a task in their body, set this so babysit can flip a merged PR's linked task to done. When set, Step 6 parses a task reference out of the PR body and calls your task board's update-status API. When unset, babysit skips this entirely and never assumes a task board exists.
 
 **Trust the CI, don't re-run locally.** Lint, typecheck, build, and unit tests should already run in CI on every push. Re-running them locally during babysitting is duplicate work — it costs minutes per PR, conflicts with the user's running dev servers, leaks subprocesses, and produces no new information. **Use `gh pr checks <pr> --watch` to wait for CI and read the conclusion.** Only re-run a check locally when CI itself is broken and the user asks for triage.
 
@@ -44,7 +48,7 @@ The calling session reads its config from the project's `CLAUDE.md`. **Adopters:
 
 ## Procedure (calling session)
 
-1. **Parse + normalize** the PR list to `{key, ghRepo, path, baseBranch, hasE2E, e2eCmd, pr, branch}`. `baseBranch` comes from the CLAUDE.md repo map; `branch` is queried from `gh pr view`. Resolve `{reviewer}`, `{askConfigured}`, `{autoMerge}` from config; `{noMerge}` from the flag.
+1. **Parse + normalize** the PR list to `{key, ghRepo, path, baseBranch, hasE2E, e2eCmd, pr, branch}`. `baseBranch` comes from the CLAUDE.md repo map; `branch` is queried from `gh pr view`. Resolve `{reviewer}`, `{askConfigured}`, `{autoMerge}`, `{task-board}` from config; `{noMerge}` from the flag.
 
 2. **Validate + filter:**
    ```bash
@@ -63,7 +67,7 @@ The calling session reads its config from the project's `CLAUDE.md`. **Adopters:
 4. **Ask the reviewer — ONE message, only if `Ask reviewer via chat` is configured.** Post a single message via the configured chat tool listing every PR (repo + number + URL + one-line what-it-is) and instruct the reviewer to review each on its GitHub PR with inline findings and **approve on GitHub** when satisfied. Capture the chat thread reference + send time; pass both to every subagent as `{chatThread}` and `{askedAt}` (any reviewer review/approval older than `{askedAt}` is stale). If the chat tool is unavailable, do NOT abort: fall back to polling-only (subagents still run all steps) and note `"reviewer-chat unreachable"` in each PR's blockers — those PRs then can't auto-merge (no approval signal you triggered) and end `READY`.
    - **Skip this step entirely when `Ask reviewer via chat` is unset** — the reviewer auto-triggers (Copilot model); subagents just poll for it in Step 4.
 
-5. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted (including `{reviewer}`, `{chatThread}`, `{askedAt}`, `{autoMerge}`, `{noMerge}`, `{doubleReview}`). Use `run_in_background: true`. Send all dispatches in a single message.
+5. **Dispatch one background `general-purpose` Agent per remaining PR**, passing the Per-PR task block verbatim with placeholders substituted (including `{reviewer}`, `{chatThread}`, `{askedAt}`, `{autoMerge}`, `{noMerge}`, `{doubleReview}`, `{task-board}`). Use `run_in_background: true`. Send all dispatches in a single message.
 
 6. **Hand control back to the user.** One sentence: "Dispatched N agents in worktrees under `<path>--babysit-pr-<pr>`. Status lands in `/tmp/babysit-<pr>-status.json`. Continue with other work — I won't poll."
 
@@ -107,12 +111,12 @@ The calling session never modifies the user's main checkouts — every subagent 
 
 ## Per-PR subagent task (passed verbatim with placeholders substituted)
 
-> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{baseBranch}`, `{hasE2E}` (`true`/`false`), `{e2eCmd}`, `{branch}`, `{reviewer}` (reviewer GitHub login), `{chatThread}` (reviewer chat thread, or empty), `{askedAt}` (epoch seconds, or 0), `{autoMerge}` (`true`/`false`), `{noMerge}` (`true`/`false`), `{doubleReview}` (`true`/`false`).
+> Substitute `{pr}`, `{ghRepo}`, `{path}`, `{baseBranch}`, `{hasE2E}` (`true`/`false`), `{e2eCmd}`, `{branch}`, `{reviewer}` (reviewer GitHub login), `{chatThread}` (reviewer chat thread, or empty), `{askedAt}` (epoch seconds, or 0), `{autoMerge}` (`true`/`false`), `{noMerge}` (`true`/`false`), `{doubleReview}` (`true`/`false`), `{task-board}` (your task board's identifier/config, or empty if unset).
 
 You are a PR babysitter for ONE pull request. Take it from "ready-for-review" to "merge-ready" (and to **merged** when auto-merge is on and `{noMerge}` is false), then return ONE JSON status line.
 
 **PR:** {pr} on {ghRepo}, branch `{branch}`, working tree at `{path}`.
-**Reviewer:** GitHub login `{reviewer}`. When `{doubleReview}` is `true` you also self-review in parallel (Step 1) and merge the reviewer's findings with yours (Step 4); when it is `false` (default) the configured reviewer is the sole reviewer and Step 1 runs only as a fallback if the reviewer can't be reached. Any reviewer review/approval older than `{askedAt}` is stale; ignore it. If the reviewer replies in a chat tool (`{chatThread}` set), read the **thread** (e.g. Slack `conversations_replies` on `{chatThread}`) — channel-history endpoints typically return ONLY top-level messages, so they show the reviewer's last *root* post (an old date) and make them look inactive while they reply in-thread. Authoritative review/approval is GitHub (`reviewDecision`), not chat.
+**Reviewer:** GitHub login `{reviewer}`. When `{doubleReview}` is `true` you also self-review in parallel (Step 1) and merge the reviewer's findings with yours (Step 4); when it is `false` (default) the configured reviewer is the sole reviewer and Step 1 runs only as a fallback if the reviewer can't be reached. Any reviewer review/approval older than `{askedAt}` is stale; ignore it. If the reviewer replies in a chat tool (`{chatThread}` set), read the **thread** (e.g. the chat tool's thread-replies endpoint on `{chatThread}`) — channel-history endpoints typically return ONLY top-level messages, so they show the reviewer's last *root* post (an old date) and make them look inactive while they reply in-thread. Authoritative review/approval is GitHub (`reviewDecision`), not chat.
 **Gate verification:** GitHub CI (`gh pr checks {pr} --repo {ghRepo} --watch`). Do NOT run lint/build/typecheck/unit-tests locally — CI already does it on every push.
 **Local e2e suite:** {hasE2E} ({e2eCmd} when true). Runs locally because there's no CI for it — and only when the diff needs it (Step 3).
 
@@ -204,6 +208,9 @@ b) **Review against:**
        git -C "$repo_path" grep -nE "\\b<id>\\b" origin/{baseBranch} origin/main -- '<paths-likely-to-consume-this>' || true
      done
      ```
+   - **Additive-contract completeness (`[WARNING]`; `[CRITICAL]` if it silently drops a user-facing safety check).** When the diff ADDS a new enum value, notification key, config field, or status, verify every sibling location that must also learn about it, not just the one the diff obviously touches. The recurring failure mode is "added in one place, missing in its siblings" — e.g. a new enum value added to a schema but not the matching API-layer enum (so a request that submits it gets rejected), or a new notification key added to the sender but not to the user-preferences list (so it can never be turned off) or the defaults/backfill logic (so existing users never get it). Two related patterns worth checking on their own:
+     - **A function's return value changed from `void` to a result/boolean** (e.g. a send/dispatch function now reports success or failure) — `git grep` every caller and confirm they actually consume it. A returned-but-ignored result is a silent bug: the caller advances state as if the action succeeded when it didn't.
+     - **A new dedup/idempotency marker** — confirm it distinguishes "evaluated, nothing to do" (mark done, don't reprocess) from "a real failure" (don't mark done, allow retry). Conflating the two either spins forever or silently drops work.
    - **Slim-shape consumer audit (`[WARNING]` min, `[CRITICAL]` if a safety/correctness check).** If the diff introduces a slim/projection type, replaces a "full" type with a slim one, or narrows a `select`, grep every consumer for each field present in the OLD shape but absent in the new one. Missing field → silent regression. Past incident: a slim-shape migration silently dropped 4 used fields, including one that disabled a compliance safety warning.
 
 c) **Produce findings** with the `[CRITICAL]` / `[WARNING]` / `[SUGGESTION]` taxonomy (data-loss/security/regression vs correctness/maintainability vs perf/cleanup).
@@ -262,10 +269,39 @@ Classify:
 
 **Skip entirely if `{hasE2E}` is `false`.**
 
-**Police e2e hard — boot the harness only when the diff needs it.** The Docker stack is the most expensive thing babysit does, so skip it whenever you safely can:
-1. **No behavioral surface in the diff** → if `/tmp/babysit-{pr}-diff.txt` is only non-behavioral files (copy/translation, docs, comments, config, generated types, test-only changes already run by CI), skip with `"e2e":"skipped-no-behavioral-change"`. Don't boot a stack to confirm a string changed.
-2. **Behavioral change present** → run `{e2eCmd}` (affected-only). Default; almost always right.
-3. **Full suite** → ONLY for sweeping changes plausibly affecting most specs (shared layout/provider, auth, global config, a dep bump touching many files). Never default to full.
+**Scope of the "already verified" marker below:** it only decides whether THIS step boots the Docker harness. Self-review, the CI gate, reviewer pickup, approval, and checkbox-ticking are unaffected — the marker means "skip the local harness", not "skip everything".
+
+**Police e2e hard — boot the harness only when the diff needs it.** The Docker stack is the most expensive thing babysit does, so skip it whenever you safely can, in priority order:
+1. **A valid, SHA-matched "already verified" marker in the PR body** → this exact HEAD was already run through the harness (e.g. by the session that pushed it, via the `create-pr` skill's convention); skip the harness (see marker check below).
+2. **No behavioral surface in the diff** → if `/tmp/babysit-{pr}-diff.txt` is only non-behavioral files (copy/translation, docs, comments, config, generated types, test-only changes already run by CI), skip with `"e2e":"skipped-no-behavioral-change"`. Don't boot a stack to confirm a string changed.
+3. **Behavioral change present** → run `{e2eCmd}` (affected-only). Default; almost always right.
+4. **Full suite** → ONLY for sweeping changes plausibly affecting most specs (shared layout/provider, auth, global config, a dep bump touching many files). Never default to full.
+
+**Before acquiring the lock, check the PR body for an "already verified" marker.** If a prior session already ran e2e against this exact commit while writing the PR, it may have left a machine-readable marker so babysit doesn't re-run the harness for nothing:
+```bash
+PR_BODY=$(gh pr view {pr} --repo {ghRepo} --json body -q '.body // ""')
+E2E_MARKER=$(printf '%s' "$PR_BODY" | grep -oE '<!--[[:space:]]*babysit-verified:[^>]*-->' | head -1)
+if [ -n "$E2E_MARKER" ]; then
+  # SHA staleness check — a push after e2e ran invalidates the marker.
+  HEAD_SHA=$(git rev-parse HEAD | head -c 7)
+  MARKER_SHA=$(printf '%s' "$E2E_MARKER" | grep -oE '"sha":"([a-f0-9]+)"' | grep -oE '[a-f0-9]{7,}' | head -1)
+  if [ -n "$MARKER_SHA" ] && [ "${MARKER_SHA:0:7}" != "$HEAD_SHA" ]; then
+    echo "STALE MARKER: marker sha=${MARKER_SHA:0:7}, HEAD=$HEAD_SHA — commits pushed after e2e ran; running harness"
+    E2E_MARKER=""   # fall through to the normal harness run below
+  else
+    [ -z "$MARKER_SHA" ] && echo "WARN: marker has no sha field — accepting (legacy format); add sha to future markers"
+    echo "e2e already verified: $E2E_MARKER — skipping harness"
+    touch /tmp/babysit-{pr}-tested
+    TICKED=$(printf '%s' "$PR_BODY" | sed 's/- \[ \]/- [x]/g')
+    [ "$TICKED" != "$PR_BODY" ] && gh pr edit {pr} --repo {ghRepo} --body "$TICKED" && echo "Ticked manual verification checkboxes"
+    echo '{"pr":{pr},"phase":"e2e-skipped","e2e":"skipped-already-verified","marker":"'"$E2E_MARKER"'"}' > /tmp/babysit-{pr}-status.json
+    # Skip the lock, harness, and lock release below — proceed straight to Step 4
+  fi
+fi
+```
+**Marker convention:** `<!-- babysit-verified: {"e2e":"X/Y","date":"YYYY-MM-DD","sha":"abc1234"} -->` in the PR body's test-results section. The `sha` field is what lets babysit detect a stale marker after a later push — treat a marker without one as legacy and accept it, but prefer stamping the sha going forward. If your `create-pr` skill (or equivalent) already stamps this on green e2e runs, babysit gets the skip for free.
+
+If the marker was valid and used, skip the rest of this step (lock + harness) and report `"e2e":"skipped-already-verified"` in the final JSON.
 
 The e2e harness boots its own ephemeral stack (auto-selected host ports recommended — see `e2e-harness-patterns` skill). Only one PR's suite runs at a time (serialized by the babysit lock):
 
@@ -291,10 +327,13 @@ On failure:
 - **Flakiness / infra** (DB connection refused, container healthcheck timeout) → tear down per the project's documented teardown, re-run `{e2eCmd}` once.
 - **Pre-existing failing spec on the branch** → blocker `"e2e failing pre-existing on {branch}: <spec>"`, continue.
 
-After green, release the lock:
+After green, release the lock and tick any manual-verification checkboxes in the PR body:
 ```bash
 rm -rf /tmp/babysit-e2e-stack.lock; trap - EXIT
 touch /tmp/babysit-{pr}-tested
+PR_BODY_POST=$(gh pr view {pr} --repo {ghRepo} --json body -q '.body // ""')
+TICKED=$(printf '%s' "$PR_BODY_POST" | sed 's/- \[ \]/- [x]/g')
+[ "$TICKED" != "$PR_BODY_POST" ] && gh pr edit {pr} --repo {ghRepo} --body "$TICKED" && echo "Ticked manual verification checkboxes"
 ```
 
 ## Step 4 — reviewer pickup
@@ -303,7 +342,7 @@ By now CI (Step 2), e2e (Step 3), and — if `{doubleReview}` was set — self-r
 
 If `/tmp/babysit-{pr}-review-done` exists, skip this step.
 
-a) **Re-query the reviewer's reviews + inline threads in ONE call:**
+a) **Re-query the reviewer's reviews, top-level comments, and inline threads in ONE call:**
 ```bash
 OWNER="${ghRepo%/*}"; NAME="${ghRepo#*/}"
 gh api graphql -F owner="$OWNER" -F name="$NAME" -F pr={pr} -f query='
@@ -311,6 +350,7 @@ gh api graphql -F owner="$OWNER" -F name="$NAME" -F pr={pr} -f query='
     repository(owner:$owner,name:$name){
       pullRequest(number:$pr){
         reviews(first:20){ nodes{ author{login} state body submittedAt } }
+        comments(last:20){ nodes{ author{login} body updatedAt } }
         reviewThreads(first:50){
           nodes{ id isResolved comments(first:20){ nodes{ databaseId author{login} path body createdAt replyTo{databaseId} } } }
         }
@@ -320,12 +360,15 @@ gh api graphql -F owner="$OWNER" -F name="$NAME" -F pr={pr} -f query='
 
 REV_COUNT=$(jq --arg r "{reviewer}" '[.data.repository.pullRequest.reviews.nodes[]|select(.author.login==$r)]|length' /tmp/babysit-{pr}-review.json)
 THREAD_COUNT=$(jq --arg r "{reviewer}" '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)|select(.comments.nodes[0].author.login==$r)]|length' /tmp/babysit-{pr}-review.json)
-echo "reviewer: $REV_COUNT reviews, $THREAD_COUNT unresolved threads"
+STATUS_COMMENT=$(jq -r --arg r "{reviewer}" '[.data.repository.pullRequest.comments.nodes[]|select(.author.login==$r)]|last|.body // ""' /tmp/babysit-{pr}-review.json)
+echo "reviewer: $REV_COUNT reviews, $THREAD_COUNT unresolved threads; latest comment: ${STATUS_COMMENT:0:120}"
 ```
+
+**Before deciding "no review yet": check `$STATUS_COMMENT`.** Some reviewers (especially bot/agent reviewers) post their verdict or a blocking reason as a plain PR comment rather than a formal GitHub review — e.g. "can't approve, missing X". A non-empty comment like that is NOT "no review yet", it's an actionable blocker: fix what it says, re-ask, and re-poll, rather than sitting in the wait loop below.
 
 **Why GraphQL, not REST:** GraphQL returns each thread `id` (`PRRT_*`) needed by `resolveReviewThread`, and filters on one consistent login in a single round-trip. Some reviewers (notably GitHub Copilot) surface under three different REST logins (`Copilot`, `copilot-pull-request-reviewer`, `copilot-pull-request-reviewer[bot]`) depending on API surface — a REST filter that matched only one once reported `applied: 0` while a real comment was unhandled. One known login via GraphQL avoids that class of bug.
 
-b) **If no review yet (`$REV_COUNT == 0` AND `$THREAD_COUNT == 0`):** first, **if you have not already self-reviewed (i.e. `{doubleReview}` was `false`), run the Step 1 self-review NOW as the fallback** — post findings, apply `[CRITICAL]`/`[WARNING]` fixes, push — so a held PR still got the mechanical checks. Then:
+b) **If no review yet (`$REV_COUNT == 0` AND `$THREAD_COUNT == 0` AND `$STATUS_COMMENT` empty):** first, **if you have not already self-reviewed (i.e. `{doubleReview}` was `false`), run the Step 1 self-review NOW as the fallback** — post findings, apply `[CRITICAL]`/`[WARNING]` fixes, push — so a held PR still got the mechanical checks. Then:
    - If `{chatThread}` is set (you asked the reviewer): poll the query every 60s for up to ~15 min; at ~5 min still nothing, post ONE reply in `{chatThread}` bumping the PR; at the cap, blocker `"awaiting reviewer review"`, touch the marker, continue (the PR will end `READY`, never merged).
    - If `{chatThread}` is empty (auto-trigger model): the reviewer may have errored/never run. Treat the fallback self-review as the sole signal, touch the marker, and continue.
 
@@ -361,10 +404,10 @@ LAST_COMMIT_TS=$(git log -1 --format=%cI)
 ```
 
 - **Approved AND newer than your last commit** → go to Step 6.
-- **Not approved, or approved before your latest fix** → if `{chatThread}` is set, post ONE reply asking the reviewer to re-review + approve; poll `reviewDecision` every 60s up to ~15 min.
-  - **APPROVED** (newer than `LAST_COMMIT_TS`) → Step 6.
-  - **CHANGES_REQUESTED / new threads** → loop back to Step 4 (cap 3 review rounds; an unresolved 3rd round → blocker `"reviewer still requesting changes after 3 rounds — needs your call"`).
-  - **No response at the cap, or no chat configured to ask** → blocker `"awaiting reviewer approval"`; PR ends `READY` (held), never auto-merged.
+- **Not approved, or approved before your latest fix** → first, **if a self-review is active for this PR** (`{doubleReview}` is `true`, or the fallback ran earlier), re-run the Step 1 checklist against just your own fix commits since the last self-review (`git diff <last-self-reviewed-sha>..HEAD`; the `/tmp/babysit-{pr}-self-reviewed` marker tracks the last-reviewed point — update it after each pass). A fix for one edge case routinely opens an adjacent one, or adds a new field/key without its siblings (the additive-contract check in Step 1b) — catching that yourself, every round, keeps pace with the reviewer instead of only covering round 1. Apply any new findings as commits, then: if `{chatThread}` is set, post ONE reply asking the reviewer to re-review + approve. Poll every 60s for up to ~15 min for a review whose `submittedAt` is newer than `LAST_COMMIT_TS`. **Don't key the poll on `reviewDecision` alone** — a second `CHANGES_REQUESTED` round can leave the decision string unchanged from the first round, so a decision-only poll silently misses the new round. Ignore any review older than `LAST_COMMIT_TS` (stale, already addressed).
+  - **New review, APPROVED** → Step 6.
+  - **New review, CHANGES_REQUESTED / new threads** → loop back to Step 4 (cap 3 review rounds; an unresolved 3rd round → blocker `"reviewer still requesting changes after 3 rounds — needs your call"`).
+  - **No new response at the cap, or no chat configured to ask** → blocker `"awaiting reviewer approval"`; PR ends `READY` (held), never auto-merged.
 - **Edge — PR authored by `{reviewer}`** → the reviewer can't approve its own PR → blocker `"PR authored by the reviewer — needs another approver"`. Don't merge.
 
 ## Step 6 — merge gate (auto-merge only)
@@ -382,7 +425,11 @@ Merge into the PR's own base — nothing else:
 BASE=$(gh pr view {pr} --repo {ghRepo} --json baseRefName -q '.baseRefName')
 gh pr merge {pr} --repo {ghRepo} --merge   # into $BASE; use --squash if the repo disallows merge commits; NEVER change the base
 ```
-Do NOT promote one branch to another (e.g. `dev`→`main`) — that's a separate, deliberate step the user owns. On a clean merge, record `"status":"MERGED","merged_into":"'"$BASE"'"`. On failure (conflict / base moved), do NOT force; conflict → blocker `"merge conflict with <base> — needs manual resolution"` (resolution must preserve both sides; never `--theirs`/`--ours`).
+Do NOT promote one branch to another (e.g. `dev`→`main`) — that's a separate, deliberate step the user owns. On a clean merge, record `"status":"MERGED","merged_into":"'"$BASE"'"`.
+
+**(Optional) If `{task-board}` is configured and the merge landed on your project's production-ready branch** (not a subsequent promotion — that's a deploy of already-done work), flip the linked task to done: parse the task reference out of the PR body and call your task board's update-status API. Skip silently if `{task-board}` is unset.
+
+On failure (conflict / base moved), do NOT force; conflict → blocker `"merge conflict with <base> — needs manual resolution"` (resolution must preserve both sides; never `--theirs`/`--ours`).
 
 ## Step 7 — completion
 
