@@ -1,17 +1,20 @@
 # useful-agent-skills
 
-A small collection of agent skills for AI-assisted development workflows. Authored in Claude/Codex-style `SKILL.md` format.
+A hub of agent skills, guardrail hooks, and workflow patterns for AI-assisted development. Human-readable first: pick an area, read one line per item, open only what you need.
 
-> **Portable with config in your project's `CLAUDE.md`.** Earlier versions of this repo hard-coded one project's paths, branch names, and ports. The current `babysit-prs` and `e2e-harness-patterns` skills are **project-agnostic**: drop a `babysit-prs Configuration` section into your CLAUDE.md (see [`templates/CLAUDE.md-additions.md`](templates/CLAUDE.md-additions.md)) and the skill reads from there. See [`skills/babysit-prs/PRECONDITIONS.md`](skills/babysit-prs/PRECONDITIONS.md) for what your project needs.
+**Portability legend:** 🟢 generic (works as-is) · 🟡 adapt-via-config (fill placeholders in your CLAUDE.md).
 
-Each skill is a self-contained markdown file. Install into the skill directory your agent uses:
+## Areas
 
-- Claude Code: `~/.claude/skills/`
-- Codex: `~/.codex/skills/`
-
-> **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts.
-
----
+| Area | What's in it |
+|---|---|
+| [🛠 Skills](skills/) | Reusable `SKILL.md` workflows: PR finalize, branch safety, task sync, worktree QA. |
+| [🪝 Hooks](hooks/) | Guardrail hooks that block risky agent actions (no-auto-merge, PR↔task link). |
+| [📊 Statusline monitor](statusline/) | Live machine-pressure badge + a heavy-op gate for multi-agent laptops. |
+| [📋 CLAUDE.md blocks](claude-md/) | Copy-paste instruction blocks: a global working agreement + project standards. |
+| [✍️ AI writing tone](tone/) | Make agent-written text read human, plus a product-copy voice guide. |
+| [📚 Doc organization](docs-organization/) | How to structure `docs/`, write handoffs, and index "change X → edit here". |
+| [⚙️ Getting set up](setup/) | A dev-environment bootstrap prompt, a cross-machine replication kit, ecosystem picks. |
 
 ## Install
 
@@ -47,78 +50,4 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
   -o "$AGENT_SKILLS_DIR/<skill-name>/SKILL.md"
 ```
 
----
-
-## Skills
-
-| Skill | Status | What it does |
-|---|---|---|
-| [`babysit-prs`](skills/babysit-prs/SKILL.md) | **active, portable** | End-to-end PR finalization. One subagent per PR, parallel. Always-on self-review **in parallel with** a configurable reviewer + CI gate + local e2e (only when the diff needs it). Optional: ask the reviewer in a chat tool, and auto-merge when production-ready. |
-| [`e2e-harness-patterns`](skills/e2e-harness-patterns/SKILL.md) | **active, reference** | Catalog of patterns for designing a local e2e harness — ephemeral stacks, dynamic ports, scope-based selection, session-bypass auth, lock-serialization, dual-speed iteration. Pairs with `babysit-prs`. |
-| [`verify-manual-tests`](skills/verify-manual-tests/SKILL.md) | ❌ **deprecated** | LLM-in-loop runner for prose checklists; superseded by deterministic e2e specs. |
-
-## Hooks
-
-Not skills, but harness-level guard rails that pair with them.
-
-| Hook | Status | What it does |
-|---|---|---|
-| [`no-auto-merge`](hooks/no-auto-merge/README.md) | **active, portable** | PreToolUse guard that physically blocks an agent from merging PRs or pushing to `main`/`master`. The agent runs reviews and gates, then stops at "ready, awaiting your explicit merge approval"; per-merge override via `ALLOW_MERGE=1` only after you approve. A hard rail that holds even when prompt-level rules drift in long sessions. |
-
-### `babysit-prs` highlights
-
-End-to-end PR finalization for one or more open PRs. The calling session dispatches **one background subagent per PR** (parallel) and returns control immediately. Each subagent independently:
-
-1. **Self-reviews** the diff against the project's `CLAUDE.md` (cross-repo BC checks, slim-shape audit, test parity), posts findings as a top-level PR comment, implements `[CRITICAL]` + `[WARNING]` as new commits — **always, in parallel** with the configured reviewer (not just a fallback).
-2. Waits for CI green (`gh pr checks <pr> --watch`).
-3. For repos with local e2e: runs the suite inside an isolated git worktree (lock-serialized), and **only when the diff has behavioral surface**.
-4. Picks up the configured reviewer's GitHub review + inline threads (`{reviewer}` login; one consistent GraphQL handle), merges them with the self-review, applies what's valid, replies + resolves threads.
-5. Stops at `READY` once fully production-ready (gates green, reviewer approved, threads resolved) — the operator merges. Only if `Auto-merge` is explicitly enabled (off by default, and we recommend keeping it off — pair with the [`no-auto-merge` hook](hooks/no-auto-merge/README.md) for hard enforcement) does it merge into the base itself.
-6. Returns ONE JSON line: `{"pr": N, "status": "MERGED|READY|READY_HELD|BLOCKED", "applied": [...], "declined": N, "e2e": "...", "held_on": [...], "blockers": [...]}`.
-
-**Invocation:** `/babysit-prs <key>:<pr> [<key>:<pr> ...]` — e.g. `/babysit-prs api:412 admin:188 portal:99`. Keys come from your CLAUDE.md repo map.
-
-**Trigger phrases:** "babysit", "finalize PRs", "ready for merge", "handle reviews and tests", "auto-handle PRs".
-
-**Requirements:** see [`skills/babysit-prs/PRECONDITIONS.md`](skills/babysit-prs/PRECONDITIONS.md).
-
-**Configuration:** copy [`templates/CLAUDE.md-additions.md`](templates/CLAUDE.md-additions.md) into your project's CLAUDE.md and fill in your repo map.
-
-### 🔔 Recommended pairing: Claude Notifications
-
-If you run multiple Claude Code sessions, install **[Claude Notifications](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications)** (`dimokol.claude-notifications`):
-
-- Per-PR sound + OS banner the moment each `babysit-prs` subagent completes.
-- One-click terminal focus — jumps you straight to the exact VS Code window/tab where the agent fired.
-- Per-session stage-dedup — exactly one notification per stage, never zero, never two.
-- Works on macOS, Windows, and Linux.
-
-Zero-config: `babysit-prs` already calls `PushNotification` at every per-PR completion.
-
----
-
-## How skills work
-
-Skills are markdown files that compatible agents load on demand. When the user asks for something matching a skill's `description`, or invokes it by name, the agent reads the file and follows its instructions.
-
-Skills live at `<agent-skills-dir>/<skill-name>/SKILL.md`. Adding a new file there and restarting the session is all that's needed — no plugin registration or settings editing.
-
-**Skill metadata** (the YAML `name` + `description`) is loaded into every session's context (cheap — one line per skill). Skill **bodies** are only loaded when invoked, so you can have many skills installed without bloating context.
-
----
-
-## Contributing
-
-Skills here are opinionated — they encode workflow decisions that have been tested under real PR / e2e load. PRs and issues are welcome, especially:
-
-- Patterns that complement what's already here (alternate test-runner integrations, non-Docker harnesses, GitLab/Bitbucket adapters).
-- Reports of preconditions or edge cases the docs don't cover.
-- Generalizations that improve portability without sacrificing the rigor that made each skill earn its place.
-
-Please don't propose narrowly project-specific skills — keep this repo focused on patterns that travel.
-
----
-
-## License
-
-MIT
+> **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts.
