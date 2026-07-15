@@ -1,3 +1,5 @@
+[← all areas](../README.md)
+
 # 📋 CLAUDE.md blocks
 
 Copy-paste instruction blocks: a global working agreement + project standards.

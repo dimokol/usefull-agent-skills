@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — install skills from dimokol/usefull-agent-skills into an agent skills dir.
+# install.sh: install skills from dimokol/usefull-agent-skills into an agent skills dir.
 #
 # Usage:
 #   Install a specific skill:   bash install.sh babysit-prs
@@ -22,7 +22,7 @@ SKILLS_AVAILABLE=(
 )
 
 # When run from a local clone (not the `curl | bash` one-liner), prefer the
-# checked-out SKILL.md over a remote fetch — this makes `bash install.sh`
+# checked-out SKILL.md over a remote fetch. This makes `bash install.sh`
 # pick up skills that were only just added locally and not pushed to `main`
 # yet, without changing behavior for the piped remote install.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""

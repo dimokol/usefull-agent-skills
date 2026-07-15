@@ -32,7 +32,7 @@ Install a specific skill by name:
 curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/install.sh | bash -s babysit-prs
 ```
 
-Then **restart Claude Code** (or open a new session) — skills are picked up on session start.
+Then **restart Claude Code** (or open a new session). Skills are picked up on session start.
 
 ### Codex install
 
@@ -50,4 +50,4 @@ curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/s
   -o "$AGENT_SKILLS_DIR/<skill-name>/SKILL.md"
 ```
 
-> **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) — sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*. Pairs natively with `babysit-prs` for per-PR completion alerts.
+> **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) (sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*). Pairs natively with `babysit-prs` for per-PR completion alerts.

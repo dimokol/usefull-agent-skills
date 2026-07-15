@@ -1,3 +1,5 @@
+[← all areas](../README.md)
+
 # 🪝 Hooks
 
 Guardrail PreToolUse hooks that block risky agent actions.

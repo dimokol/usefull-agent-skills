@@ -1,3 +1,5 @@
+[← all areas](../README.md)
+
 # 📊 Statusline monitor
 
 A live machine-pressure badge shown in your agent's statusline, plus a heavy-op gate, so you can
@@ -5,8 +7,8 @@ tell at a glance whether it's safe to kick off heavy work (installs, e2e, builds
 running several agent sessions on one laptop.
 
 Built after repeated memory-thrash lag incidents from running many agents at once. Design
-rationale (why swap, not CPU, is the thing that actually causes the lag): see `DESIGN.md` in
-this directory.
+rationale (why swap, not CPU, is the thing that actually causes the lag): see
+[DESIGN.md](DESIGN.md) in this directory.
 
 > **macOS today.** The probe reads `vm_stat`, `sysctl vm.swapusage`, `sysctl vm.loadavg`, and
 > `df -g`, all macOS built-ins, chosen because they're cheap enough to run every statusline

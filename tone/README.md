@@ -1,3 +1,5 @@
+[← all areas](../README.md)
+
 # ✍️ AI writing tone
 
 Make agent-written text read human, plus a product-copy voice guide.

@@ -1,3 +1,5 @@
+[← all areas](../README.md)
+
 # 📚 Doc organization
 
 How to structure `docs/`, write handoffs, and index "change X → edit here".

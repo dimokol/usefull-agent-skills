@@ -10,11 +10,11 @@
 # A checkout is OCCUPIED when `.qa-lock` exists at its repo root (written on
 # promotion, removed when the human marks the branch done). While occupied,
 # this hook blocks branch-SWAPPING git ops (checkout / switch / reset --hard)
-# targeting that checkout — those are the only ops that change the branch a
+# targeting that checkout. Those are the only ops that change the branch a
 # dev server is running from. Read-only git (fetch/log/status/diff/show) and
-# every `git worktree` subcommand (add/remove/prune/list — none of them touch
+# every `git worktree` subcommand (add/remove/prune/list, none of which touch
 # the main checkout's branch) always pass through, as does any path that
-# looks like a worktree (matches `*--wt/*`, `*--wt`, or `*--qa-*`) — dev
+# looks like a worktree (matches `*--wt/*`, `*--wt`, or `*--qa-*`). Dev
 # happens there, never in the locked main checkout.
 #
 # CONFIG (env vars, all optional):
@@ -30,7 +30,7 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 case "$CMD" in *ALLOW_QA_CHECKOUT=1*) exit 0 ;; esac
 
 # Only consider branch-SWAPPING git ops; everything else (incl. ALL `git
-# worktree` subcommands — they never change the main checkout's branch) is
+# worktree` subcommands, which never change the main checkout's branch) is
 # irrelevant.
 printf '%s' "$CMD" | grep -qE '\bgit\b([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+(checkout|switch|reset)\b' || exit 0
 # A plain `git reset` (soft/mixed) and `git checkout -- <file>` are not branch
@@ -60,5 +60,5 @@ LOCK="$ROOT/.qa-lock"
 [ -f "$LOCK" ] || exit 0   # checkout is FREE → allow
 
 OCCUPANT=$(head -1 "$LOCK" 2>/dev/null)
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"BLOCKED: %s is locked for manual QA (branch [%s], see %s and your worktree-qa-queue file). Do NOT swap its branch — a dev server may be running from here. The slot frees only when the human marks that branch done. Work in a WORKTREE instead. If the human has freed the slot or explicitly told you to swap it, re-run prefixed with ALLOW_QA_CHECKOUT=1."}}\n' "$ROOT" "$OCCUPANT" "$LOCK"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"BLOCKED: %s is locked for manual QA (branch [%s], see %s and your worktree-qa-queue file). Do NOT swap its branch. A dev server may be running from here. The slot frees only when the human marks that branch done. Work in a WORKTREE instead. If the human has freed the slot or explicitly told you to swap it, re-run prefixed with ALLOW_QA_CHECKOUT=1."}}\n' "$ROOT" "$OCCUPANT" "$LOCK"
 exit 0

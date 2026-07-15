@@ -1,10 +1,10 @@
 # no-auto-merge guard (PreToolUse hook)
 
-A machine-level safety rail for agent-driven PR workflows: it **physically blocks** an AI agent from merging PRs or pushing to protected branches, no matter what its prompt or skill says. The agent can still do everything else — review, fix, run gates, ask your reviewer, report status — but the merge step always stops at "ready, awaiting your explicit approval".
+A machine-level safety rail for agent-driven PR workflows: it **physically blocks** an AI agent from merging PRs or pushing to protected branches, no matter what its prompt or skill says. The agent can still do everything else (review, fix, run gates, ask your reviewer, report status), but the merge step always stops at "ready, awaiting your explicit approval".
 
 ## Why
 
-Prompt-level rules ("never merge without asking") are soft: a long session, a compacted context, or an over-eager skill can walk right past them. We learned this the hard way — an agent once promoted `dev`→`main` on its own initiative, and another merged a PR to `dev` that wasn't production-ready. A `PreToolUse` hook is hard: the command is denied before it runs, and the denial message tells the agent exactly what to do instead.
+Prompt-level rules ("never merge without asking") are soft: a long session, a compacted context, or an over-eager skill can walk right past them. We learned this the hard way. An agent once promoted `dev`→`main` on its own initiative, and another merged a PR to `dev` that wasn't production-ready. A `PreToolUse` hook is hard: the command is denied before it runs, and the denial message tells the agent exactly what to do instead.
 
 ## What it blocks
 
@@ -15,7 +15,7 @@ Prompt-level rules ("never merge without asking") are soft: a long session, a co
 
 ## What it does NOT block (tested)
 
-Read-only and everyday commands pass through untouched: `gh pr view` / `gh pr checks` / `gh pr create`, `git fetch` / `log` / `status` / `merge-base`, and normal feature-branch pushes (`git push origin feat/main-page` is fine — only full `main`/`master` destination tokens match).
+Read-only and everyday commands pass through untouched: `gh pr view` / `gh pr checks` / `gh pr create`, `git fetch` / `log` / `status` / `merge-base`, and normal feature-branch pushes (`git push origin feat/main-page` is fine, since only full `main`/`master` destination tokens match).
 
 ## Override
 
@@ -25,7 +25,7 @@ When you have explicitly approved a specific merge, the agent re-runs the comman
 ALLOW_MERGE=1 gh pr merge 123 --repo you/repo --merge
 ```
 
-The agent must never set `ALLOW_MERGE=1` without your explicit per-merge approval — put that rule in your CLAUDE.md (see below).
+The agent must never set `ALLOW_MERGE=1` without your explicit per-merge approval. Put that rule in your CLAUDE.md (see below).
 
 ## Install
 
@@ -60,12 +60,12 @@ The agent must never set `ALLOW_MERGE=1` without your explicit per-merge approva
    ```markdown
    **Never auto-merge.** Nothing merges without the operator's explicit instruction for that
    specific merge AND manual approval. Run reviews/gates, then STOP and report
-   "READY — awaiting your explicit merge approval". Only after approval, prefix the merge
+   "READY, awaiting your explicit merge approval". Only after approval, prefix the merge
    command with ALLOW_MERGE=1 (a PreToolUse hook blocks it otherwise).
    ```
 
-4. Verify: ask the agent to run `gh pr merge --help` — it should be denied with the guard's message, while `gh pr view <pr>` works normally.
+4. Verify: ask the agent to run `gh pr merge --help`. It should be denied with the guard's message, while `gh pr view <pr>` works normally.
 
-Requires `jq`. Protected branches are `main` and `master` by default — edit the two `main|master` patterns in `hook.sh` to add others (e.g. `production`).
+Requires `jq`. Protected branches are `main` and `master` by default. Edit the two `main|master` patterns in `hook.sh` to add others (e.g. `production`).
 
 Pairs with [`babysit-prs`](../../skills/babysit-prs/SKILL.md): keep its `Auto-merge` config off (the default) and this hook guarantees the policy even for sessions that never read the skill.
