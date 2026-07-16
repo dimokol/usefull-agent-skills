@@ -14,6 +14,7 @@ A hub of agent skills, guardrail hooks, and workflow patterns for AI-assisted de
 | [📋 CLAUDE.md blocks](claude-md/) | Copy-paste instruction blocks: a global working agreement + project standards. |
 | [✍️ AI writing tone](tone/) | Make agent-written text read human, plus a product-copy voice guide. |
 | [📚 Doc organization](docs-organization/) | How to structure `docs/`, write handoffs, and index "change X → edit here". |
+| [🧠 Memory](memory/) | A file-based agent-memory system (what to store where) plus a starter pack of behavioral memories worth seeding. |
 | [⚙️ Getting set up](setup/) | A dev-environment bootstrap prompt, a cross-machine replication kit, ecosystem picks. |
 
 ## Install
