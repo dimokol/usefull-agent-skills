@@ -1,5 +1,5 @@
 #!/bin/sh
-# no-auto-merge guard — a Claude Code PreToolUse hook that physically blocks
+# no-auto-merge guard, a Claude Code PreToolUse hook that physically blocks
 # merge/deploy commands so an agent can never merge a PR or push to a protected
 # branch on its own initiative. The agent runs reviews and gates, then stops and
 # reports "ready, awaiting your explicit merge approval".
@@ -27,7 +27,7 @@ deny() {
   exit 0
 }
 
-# 1) gh pr merge — any repo, any base.
+# 1) gh pr merge, any repo, any base.
 printf '%s' "$CMD" | grep -qE '\bgh[[:space:]]+pr[[:space:]]+merge\b' && deny "gh pr merge"
 
 # 2) gh api merge endpoints (REST PR merge / branch merge, GraphQL merge mutations).
