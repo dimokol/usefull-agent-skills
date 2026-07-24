@@ -9,6 +9,7 @@ A hub of agent skills, guardrail hooks, and workflow patterns for AI-assisted de
 | Area | What's in it |
 |---|---|
 | [🛠 Skills](skills/) | Reusable `SKILL.md` workflows: PR finalize, branch safety, task sync, worktree QA. |
+| [🧩 MCP servers](mcp/) | Local MCP servers you wire into a project. **agent-chat**: a shared cross-agent chat so multiple CLI agents (Claude Code + Codex) deliberate across terminals. |
 | [🪝 Hooks](hooks/) | Guardrail hooks that block risky agent actions (no-auto-merge, PR↔task link). |
 | [📊 Statusline monitor](statusline/) | Live machine-pressure badge + a heavy-op gate for multi-agent workflows to prevent exploding laptops. |
 | [📋 CLAUDE.md blocks](claude-md/) | Copy-paste instruction blocks: a global working agreement + project standards. |
@@ -49,5 +50,18 @@ mkdir -p "$AGENT_SKILLS_DIR/<skill-name>"
 curl -fsSL https://raw.githubusercontent.com/dimokol/usefull-agent-skills/main/skills/<skill-name>/SKILL.md \
   -o "$AGENT_SKILLS_DIR/<skill-name>/SKILL.md"
 ```
+
+### MCP servers
+
+The one-liner above installs `SKILL.md` workflows into your agent's skills dir.
+[MCP servers](mcp/) are different: they're small programs wired into a project's
+MCP config, so they install per-project via their own installer. For `agent-chat`:
+
+```bash
+git clone https://github.com/dimokol/usefull-agent-skills.git
+node usefull-agent-skills/mcp/agent-chat/install.mjs --project /path/to/your-project --codex
+```
+
+Then restart / reconnect the MCP server in each terminal. See [mcp/agent-chat](mcp/agent-chat/).
 
 > **Companion extension if you run multiple Claude Code agents at once:** [**Claude Notifications**](https://marketplace.visualstudio.com/items?itemName=dimokol.claude-notifications) (sound + OS banner when any agent finishes, with one-click *focus the exact VS Code terminal that fired the notification*). Pairs natively with `babysit-prs` for per-PR completion alerts.
